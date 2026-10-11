@@ -19,6 +19,7 @@
  */
 
 const express = require('express');
+const crypto = require('crypto');
 const { SMTPServer } = require('smtp-server');
 const { simpleParser } = require('mailparser');
 
@@ -28,6 +29,9 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const SMTP_PORT = process.env.SMTP_PORT || 2525;
 const TOKEN = process.env.AGENT_MAIL_TOKEN || 'dev-token-change-me';
+if (TOKEN === 'dev-token-change-me') {
+  console.warn('[security] AGENT_MAIL_TOKEN is the default dev token — set a long random token in production!');
+}
 const DOMAIN = process.env.MAIL_DOMAIN || 'localhost';
 
 // --- Storage backend: Supabase if configured, else in-memory ---
@@ -43,10 +47,10 @@ const useSupabase = !!supabase;
 
 // In-memory fallback: address -> [{ id, from, subject, date, text, links }]
 const inboxes = new Map();
-let emailCounter = 0;
 
+// Globally unique email ids (safe across restarts and storage backends)
 function newId() {
-  return `em_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  return `em_${crypto.randomUUID().replace(/-/g, '')}`;
 }
 
 // Normalize a Supabase row or in-memory object to the API email shape
@@ -78,7 +82,7 @@ async function storeEmail({ address, from, subject, date, text, links }) {
   if (!inboxes.has(address)) inboxes.set(address, []);
   const emails = inboxes.get(address);
   emails.push({
-    id: `em_${++emailCounter}`,
+    id: newId(),
     from,
     subject,
     date,
@@ -147,10 +151,11 @@ function auth(req, res, next) {
   next();
 }
 
-// Extract URLs from text
+// Extract URLs from text, trimming trailing sentence punctuation
+// (e.g. "https://x.com/verify." at the end of a sentence)
 function extractLinks(text) {
   const matches = text.match(/https?:\/\/[^\s<>"')]+/g) || [];
-  return [...new Set(matches)];
+  return [...new Set(matches.map(u => u.replace(/[.,;:!?]+$/, '')))];
 }
 
 // --- SMTP server: receives incoming mail ---
@@ -207,9 +212,11 @@ app.get('/health', async (req, res) => {
 
 // Create a new email address
 app.post('/api/addresses', auth, (req, res) => {
-  const prefix = String(req.body.prefix || `agent${Date.now().toString(36)}`)
+  let prefix = String(req.body.prefix || `agent${Date.now().toString(36)}`)
     .toLowerCase()
     .replace(/[^a-z0-9._-]/g, '');
+  // Fall back to a generated prefix if the sanitized input is empty
+  if (!prefix) prefix = `agent${Date.now().toString(36)}`;
   const address = `${prefix}@${DOMAIN}`;
   // No DB write needed until mail arrives; memory path keeps a local entry
   if (!useSupabase && !inboxes.has(address)) inboxes.set(address, []);

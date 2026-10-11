@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: agent-mail-service
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        sync: false # Render injects PORT automatically
+      - key: SMTP_PORT
+        value: "2525"
+      - key: AGENT_MAIL_TOKEN
+        sync: false # set a long random token in the Render dashboard
+      - key: MAIL_DOMAIN
+        sync: false # set to the DigitalPlat domain once DNS/MX is live
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
