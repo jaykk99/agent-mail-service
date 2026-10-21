@@ -37,12 +37,24 @@ All endpoints except `GET /health` require
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/health` | `{ ok, domain, storage, addresses }` (no auth) |
-| POST | `/api/addresses` | `{ prefix }` -> `{ address }` |
-| GET | `/api/inbox/:address` | email list (id/from/subject/date) |
-| GET | `/api/inbox/:address/:id` | full email (subject, body, links) |
-| GET | `/api/verify-link/:address?from=` | newest verification link for the address |
+| GET | `/health` | `{ ok, domain, storage, addresses, retentionDays, deadLetters, retryQueue }` (no auth) |
+| POST | `/api/addresses` | `{ prefix }` -> `{ address }` (rate-limited, prefix max 64 chars) |
+| GET | `/api/inbox/:address` | email list (id/from/subject/date/attachments count); `?limit=&offset=` pagination |
+| GET | `/api/inbox/:address/:id` | full email (subject, body, links, attachment metadata) |
+| GET | `/api/verify-link/:address?from=` | newest verification link for the address (immediate) |
+| GET | `/api/verify-link/:address/wait?from=&timeoutMs=` | long-poll for a link (default 30s, max 120s) — no busy-polling |
+| GET | `/api/dead-letters` | emails that exhausted store retries |
 | DELETE | `/api/inbox/:address` | clear inbox |
+
+Reliability: Supabase store failures are retried with exponential backoff +
+jitter (up to 5 attempts) before landing in the dead-letter log, which is
+visible via `/api/dead-letters` and the health endpoint. The SMTP session
+still succeeds on a store failure so the sender never bounces a message the
+service intends to deliver on retry. In-memory inboxes are pruned to the last
+50 emails per address and to `RETENTION_DAYS` (default 7); for Supabase, run
+the `delete` in `supabase-migration.sql` periodically. Inbox addresses are
+validated (`local@domain` shape); bodies are capped at 50KB; address creation
+is rate-limited (30/min per IP by default).
 
 ## Environment
 
@@ -53,6 +65,8 @@ All endpoints except `GET /health` require
 | `AGENT_MAIL_TOKEN` | yes (prod) | long random Bearer token |
 | `MAIL_DOMAIN` | yes (prod) | domain used when minting addresses |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` | yes (prod) | persistent storage |
+| `RETENTION_DAYS` | no | in-memory mail older than this is pruned (default 7) |
+| `RATE_LIMIT_PER_MINUTE` | no | address-creation budget per IP per minute (default 30) |
 
 ## Pending (needs Jay)
 

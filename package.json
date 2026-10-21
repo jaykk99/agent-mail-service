@@ -5,8 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/e2e.test.js",
-    "check": "node --check server.js && node --check test/e2e.test.js"
+    "test": "node test/unit.test.js && node test/e2e.test.js",
+    "check": "node --check server.js && node --check test/e2e.test.js && node --check test/unit.test.js"
   },
   "engines": {
     "node": ">=18"
