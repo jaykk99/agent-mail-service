@@ -14,3 +14,8 @@ create table if not exists agent_emails (
 
 create index if not exists agent_emails_address_created_idx
   on agent_emails (address, created_at desc);
+
+-- 2026-10-21: attachment metadata (filename, content type, size — never
+-- content). The server falls back gracefully if this column is missing.
+alter table agent_emails
+  add column if not exists attachments jsonb default '[]'::jsonb;
