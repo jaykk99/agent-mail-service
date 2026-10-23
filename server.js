@@ -8,21 +8,32 @@
  * Endpoints:
  *   POST /api/addresses          { prefix } -> { address }
  *   GET  /api/addresses          -> known addresses with inbox counts
- *   GET  /api/inbox/:address     -> paginated list (page, per_page, q, from)
+ *   GET  /api/inbox/:address     -> paginated list (page/per_page AND limit/offset, q, from)
  *   GET  /api/inbox/:address/:id -> full email (subject, body, links, attachment metadata)
  *   DELETE /api/inbox/:address   -> clear inbox
- *   GET  /api/verify-link/:address?from= -> newest verification URL
+ *   GET  /api/verify-link/:address?from= -> newest verification URL (immediate)
+ *   GET  /api/verify-link/:address/wait?from=&timeoutMs= -> long-poll for a link
+ *   GET  /api/dead-letters       -> emails that failed to store after retries
  *   GET  /dashboard              -> local browser UI for addresses/inboxes
  *
- * Features: per-address receive rate limiting, address-creation rate limiting,
- * address TTL auto-cleanup sweep, HMAC-signed incoming-mail webhooks,
- * attachment metadata (never content), outbound SMTP relay config validation.
+ * Features: retry-with-backoff store queue + dead-letter log, retention
+ * pruning, address TTL auto-cleanup sweep, per-IP rate limiting
+ * (RATE_LIMIT_PER_MINUTE) plus hourly quotas (ADDRESS_CREATE_MAX_PER_HOUR,
+ * EMAILS_PER_ADDRESS_PER_HOUR), HMAC-signed incoming-mail webhooks,
+ * structured request logging, attachment metadata (never content),
+ * outbound SMTP relay config validation.
+ *
+ * Rate-limit precedence: BOTH creation limits apply — a creation must pass
+ * the per-IP per-minute limit AND the global hourly quota; either one can
+ * return 429. Pagination precedence: if limit/offset are present they win,
+ * otherwise page/per_page are used.
  *
  * Auth: Bearer token from AGENT_MAIL_TOKEN env var.
  *
  * Storage: Supabase table `agent_emails` when SUPABASE_URL and
  * SUPABASE_SERVICE_KEY are set; otherwise falls back to an in-memory
- * Map so local dev keeps working with no config.
+ * Map so local dev keeps working with no config. Failed Supabase stores
+ * are retried with exponential backoff before landing in the dead-letter log.
  */
 
 const express = require('express');
@@ -31,7 +42,8 @@ const { SMTPServer } = require('smtp-server');
 const { simpleParser } = require('mailparser');
 
 const app = express();
-app.use(express.json());
+// Bound request bodies so oversized posts can't be used to grow memory.
+app.use(express.json({ limit: '50kb' }));
 
 const PORT = process.env.PORT || 3000;
 const SMTP_PORT = process.env.SMTP_PORT || 2525;
@@ -46,11 +58,16 @@ function numEnv(name, fallback) {
   return Number.isFinite(v) && v >= 0 ? v : fallback;
 }
 
-// --- Feature config ---
-// Address TTL: addresses with no activity older than this are auto-cleaned.
-// ADDRESS_TTL_HOURS=0 disables the sweep entirely.
+// --- Feature config (union of both sides) ---
+// Retention (origin): in-memory mail older than this is pruned on store.
+const RETENTION_DAYS = Math.max(1, Number(process.env.RETENTION_DAYS) || 7);
+// Per-IP address-creation rate limit (origin).
+const RATE_LIMIT_PER_MINUTE = Math.max(1, Number(process.env.RATE_LIMIT_PER_MINUTE) || 30);
+// Address TTL (quota): addresses with no activity older than this are
+// auto-cleaned. ADDRESS_TTL_HOURS=0 disables the sweep entirely.
 const ADDRESS_TTL_HOURS = numEnv('ADDRESS_TTL_HOURS', 72);
 const ADDRESS_SWEEP_MS = numEnv('ADDRESS_SWEEP_MS', 30 * 60 * 1000);
+// Hourly quotas (quota side). 0 disables each.
 const ADDRESS_CREATE_MAX_PER_HOUR = numEnv('ADDRESS_CREATE_MAX_PER_HOUR', 20);
 const EMAILS_PER_ADDRESS_PER_HOUR = numEnv('EMAILS_PER_ADDRESS_PER_HOUR', 100);
 // Optional webhook fired on every received email (HMAC-signed when the
@@ -141,6 +158,97 @@ function rateLimitExceeded(key, maxPerHour) {
   return false;
 }
 
+// --- Fixed-window rate limiter (origin, per IP per minute) ---
+const bucketState = new Map();
+function rateLimitWindow(key, max, windowMs) {
+  const now = Date.now();
+  const entry = bucketState.get(key) || { count: 0, resetAt: now + windowMs };
+  if (now >= entry.resetAt) {
+    entry.count = 0;
+    entry.resetAt = now + windowMs;
+  }
+  entry.count++;
+  bucketState.set(key, entry);
+  return entry.count <= max;
+}
+function addressRateLimit(req, res, next) {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  if (!rateLimitWindow(`addr:${ip}`, RATE_LIMIT_PER_MINUTE, 60000)) {
+    res.setHeader('Retry-After', '60');
+    return res.status(429).json({ ok: false, error: 'Rate limit exceeded — try again in a minute' });
+  }
+  next();
+}
+
+// Globally unique email ids (safe across restarts and storage backends)
+function newId() {
+  return `em_${crypto.randomUUID().replace(/-/g, '')}`;
+}
+
+// --- Retry queue + dead letters for failed stores (origin) ---
+const MAX_STORE_ATTEMPTS = 5;
+const retryQueue = []; // [{ email, attempts, nextRetryAt }]
+const deadLetters = []; // [{ id, address, from, subject, attempts, lastError, deadAt }] (bounded 100)
+
+function backoffMs(attempt) {
+  // Exponential backoff with jitter: 1s, 2s, 4s, 8s, 16s (+ up to 25% jitter), capped at 60s.
+  const base = Math.min(60000, 1000 * 2 ** attempt);
+  return Math.round(base * (1 + Math.random() * 0.25));
+}
+
+function recordDeadLetter(email, lastError) {
+  deadLetters.push({
+    id: newId(),
+    address: email.address,
+    from: email.from,
+    subject: email.subject,
+    attempts: MAX_STORE_ATTEMPTS,
+    lastError: String(lastError && lastError.message || lastError),
+    deadAt: new Date().toISOString(),
+  });
+  if (deadLetters.length > 100) deadLetters.shift();
+  console.error(`[storage] dead-lettered mail for ${email.address}: ${lastError && lastError.message}`);
+}
+
+function scheduleRetry(email, err, attempts) {
+  if (attempts >= MAX_STORE_ATTEMPTS) {
+    recordDeadLetter(email, err);
+    return;
+  }
+  retryQueue.push({ email, attempts, nextRetryAt: Date.now() + backoffMs(attempts) });
+}
+
+setInterval(async () => {
+  if (!retryQueue.length) return;
+  const now = Date.now();
+  const due = retryQueue.filter(j => j.nextRetryAt <= now);
+  if (!due.length) return;
+  for (const job of due) {
+    const i = retryQueue.indexOf(job);
+    if (i !== -1) retryQueue.splice(i, 1);
+    try {
+      await storeEmailRaw(job.email);
+      console.log(`[storage] retry succeeded for ${job.email.address} (attempt ${job.attempts + 1})`);
+    } catch (err) {
+      scheduleRetry(job.email, err, job.attempts + 1);
+    }
+  }
+}, 1000).unref();
+
+// --- Request ids + structured request logging (origin) ---
+app.use((req, res, next) => {
+  req.id = crypto.randomUUID().slice(0, 8);
+  const started = Date.now();
+  res.on('finish', () => {
+    console.log(JSON.stringify({
+      level: 'info', type: 'http', req: req.id,
+      method: req.method, path: req.path,
+      status: res.statusCode, ms: Date.now() - started,
+    }));
+  });
+  next();
+});
+
 // --- Incoming-mail webhook (fire-and-forget, HMAC-signed) ---
 async function fireIncomingWebhook({ address, email }) {
   if (!WEBHOOK_URL) return;
@@ -217,9 +325,12 @@ if (ADDRESS_TTL_HOURS > 0 && ADDRESS_SWEEP_MS > 0) {
   console.log('[ttl] address TTL sweep disabled');
 }
 
-// Globally unique email ids (safe across restarts and storage backends)
-function newId() {
-  return `em_${crypto.randomUUID().replace(/-/g, '')}`;
+// Validate an address path parameter: local@domain shape, bounded length.
+function validAddressParam(addr) {
+  if (typeof addr !== 'string' || addr.length === 0 || addr.length > 254) return false;
+  const at = addr.indexOf('@');
+  if (at <= 0 || at !== addr.lastIndexOf('@') || at === addr.length - 1) return false;
+  return /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(addr);
 }
 
 // Normalize a Supabase row or in-memory object to the API email shape
@@ -236,19 +347,13 @@ function toEmailShape(e) {
   };
 }
 
-async function storeEmail({ address, from, subject, date, text, links, attachments = [] }) {
-  const record = {
-    id: newId(),
-    from,
-    subject,
-    date,
-    text,
-    links,
-    attachments,
-  };
+// Raw store without retry bookkeeping (used by both the direct path and retries).
+async function storeEmailRaw(record) {
+  const { address, from, subject, date, text, links } = record;
+  const attachments = record.attachments || [];
   if (useSupabase) {
     const row = {
-      id: record.id,
+      id: record.id || newId(),
       address,
       from_addr: from,
       subject,
@@ -267,22 +372,38 @@ async function storeEmail({ address, from, subject, date, text, links, attachmen
       ({ error } = await supabase.from('agent_emails').insert(row));
     }
     if (error) throw error;
-    return record;
+    return { ...record, id: row.id, attachments };
   }
   if (!inboxes.has(address)) inboxes.set(address, []);
   const emails = inboxes.get(address);
-  emails.push(record);
-  // Keep inbox bounded
-  if (emails.length > 50) emails.shift();
-  return record;
+  const stored = {
+    id: record.id || newId(),
+    from, subject, date, text, links, attachments,
+  };
+  emails.push(stored);
+  // Keep inbox bounded, and prune entries older than the retention window.
+  const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  while (emails.length && new Date(emails[0].date).getTime() < cutoff) emails.shift();
+  if (emails.length > 50) emails.splice(0, emails.length - 50);
+  return stored;
 }
 
-// Newest first, with optional search + pagination
-async function listEmails(address, { q = '', from = '', page = 1, perPage = 20 } = {}) {
+async function storeEmail(email) {
+  const record = { ...email, id: email.id || newId(), attachments: email.attachments || [] };
+  try {
+    return await storeEmailRaw(record);
+  } catch (err) {
+    scheduleRetry(record, err, 1);
+    throw err;
+  }
+}
+
+// Newest first, with optional search + BOTH pagination styles.
+// Precedence: explicit limit/offset win; otherwise page/perPage are used.
+// Returns { emails, total, page, perPage, pages, limit, offset }.
+async function listEmails(address, { q = '', from = '', page, perPage, limit, offset } = {}) {
   q = String(q || '').toLowerCase();
   from = String(from || '').toLowerCase();
-  page = Math.max(1, parseInt(page, 10) || 1);
-  perPage = Math.min(100, Math.max(1, parseInt(perPage, 10) || 20));
 
   async function fetchAll() {
     if (useSupabase) {
@@ -303,24 +424,38 @@ async function listEmails(address, { q = '', from = '', page = 1, perPage = 20 }
   if (q) {
     emails = emails.filter(e =>
       e.subject.toLowerCase().includes(q) ||
-      String(e.from).toLowerCase().includes(q) ||
-      String(e.text).toLowerCase().includes(q));
+      String(e.from || '').toLowerCase().includes(q) ||
+      String(e.text || '').toLowerCase().includes(q));
   }
   if (from) {
-    emails = emails.filter(e => String(e.from).toLowerCase().includes(from));
+    emails = emails.filter(e => String(e.from || '').toLowerCase().includes(from));
   }
   const total = emails.length;
-  const pages = Math.max(1, Math.ceil(total / perPage));
-  const safePage = Math.min(page, pages);
-  const slice = emails.slice((safePage - 1) * perPage, safePage * perPage);
-  return { emails: slice, total, page: safePage, perPage, pages };
+
+  let effLimit, effOffset, effPage, effPerPage, pages;
+  if (limit !== undefined || offset !== undefined) {
+    effLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
+    effOffset = Math.max(0, parseInt(offset, 10) || 0);
+    effPerPage = effLimit;
+    pages = Math.max(1, Math.ceil(total / effLimit));
+    effPage = Math.floor(effOffset / effLimit) + 1;
+  } else {
+    effPerPage = Math.min(100, Math.max(1, parseInt(perPage, 10) || 20));
+    const reqPage = Math.max(1, parseInt(page, 10) || 1);
+    pages = Math.max(1, Math.ceil(total / effPerPage));
+    effPage = Math.min(reqPage, pages);
+    effLimit = effPerPage;
+    effOffset = (effPage - 1) * effPerPage;
+  }
+  const slice = emails.slice(effOffset, effOffset + effLimit);
+  return { emails: slice, total, page: effPage, perPage: effPerPage, pages, limit: effLimit, offset: effOffset };
 }
 
 async function getEmail(address, id) {
   if (useSupabase) {
     const { data, error } = await supabase
       .from('agent_emails')
-      .select('id, address, from_addr, subject, date, text_body, links, created_at')
+      .select('id, address, from_addr, subject, date, text_body, links, attachments, created_at')
       .eq('address', address)
       .eq('id', id)
       .maybeSingle();
@@ -361,45 +496,83 @@ function auth(req, res, next) {
 // Extract URLs from text, trimming trailing sentence punctuation
 // (e.g. "https://x.com/verify." at the end of a sentence)
 function extractLinks(text) {
-  const matches = text.match(/https?:\/\/[^\s<>"')]+/g) || [];
+  const matches = String(text || '').match(/https?:\/\/[^\s<>"')]+/g) || [];
   return [...new Set(matches.map(u => u.replace(/[.,;:!?]+$/, '')))];
+}
+
+// Attachment metadata only (filename/type/size) — content is not stored.
+function extractAttachments(parsed) {
+  return (parsed.attachments || []).map(a => ({
+    filename: a.filename || 'unnamed',
+    contentType: a.contentType || 'application/octet-stream',
+    size: typeof a.size === 'number' ? a.size : (a.content ? a.content.length : 0),
+  }));
+}
+
+// Find the newest verification-style link in a newest-first email list.
+function findVerifyLink(emails, fromFilter) {
+  const candidates = fromFilter
+    ? emails.filter(e => String(e.from || '').toLowerCase().includes(fromFilter))
+    : emails;
+  for (const email of candidates) {
+    const verifyLinks = (email.links || []).filter(u =>
+      /verif|confirm|activate|validate|magic|signin|login|reset|otp|code/i.test(u)
+    );
+    if (verifyLinks.length > 0) {
+      return { url: verifyLinks[0], emailId: email.id };
+    }
+    if (email.links.length > 0) {
+      return { url: email.links[0], emailId: email.id };
+    }
+  }
+  return null;
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, Math.max(0, ms)));
 }
 
 // --- SMTP server: receives incoming mail ---
 const smtp = new SMTPServer({
   disabledCommands: ['AUTH', 'STARTTLS'],
   logger: false,
+  // Reject absurdly large messages before parsing.
+  size: 10 * 1024 * 1024,
   onData(stream, session, callback) {
     simpleParser(stream)
       .then(async parsed => {
         try {
           const toAddrs = (parsed.to?.value || []).map(a => a.address.toLowerCase());
           const links = extractLinks(`${parsed.subject || ''}\n${parsed.text || ''}`);
-          // Attachment metadata only — content is never stored.
-          const attachments = (parsed.attachments || []).map(a => ({
-            filename: a.filename || 'unnamed',
-            contentType: a.contentType || 'application/octet-stream',
-            size: a.size || (a.content ? a.content.length : 0),
-          }));
+          const attachments = extractAttachments(parsed);
           for (const addr of toAddrs) {
             registerAddress(addr);
             if (rateLimitExceeded(`recv:${addr}`, EMAILS_PER_ADDRESS_PER_HOUR)) {
               console.warn(`[smtp] per-address receive rate limit hit for ${addr}, email dropped`);
               continue;
             }
-            const record = await storeEmail({
-              address: addr,
-              from: parsed.from?.text || '',
-              subject: parsed.subject || '',
-              date: parsed.date?.toISOString() || new Date().toISOString(),
-              text: (parsed.text || '').slice(0, 10000),
-              links,
-              attachments,
-            });
-            // Webhook is fire-and-forget; SMTP accept must not wait on it.
-            fireIncomingWebhook({ address: addr, email: record }).catch(() => {});
+            try {
+              const record = await storeEmail({
+                address: addr,
+                from: parsed.from?.text || '',
+                subject: parsed.subject || '',
+                date: parsed.date?.toISOString() || new Date().toISOString(),
+                text: (parsed.text || '').slice(0, 10000),
+                links,
+                attachments,
+              });
+              // Webhook is fire-and-forget; SMTP accept must not wait on it.
+              fireIncomingWebhook({ address: addr, email: record }).catch(() => {});
+            } catch (err) {
+              // Already queued for retry; the SMTP session still succeeds so the
+              // sender does not bounce a message we intend to deliver later.
+              console.error(`[smtp] store failed for ${addr}, queued for retry: ${err.message}`);
+            }
           }
-          console.log(`[smtp] received mail for ${toAddrs.join(', ')}`);
+          console.log(JSON.stringify({
+            level: 'info', type: 'smtp',
+            to: toAddrs, attachments: attachments.length,
+          }));
         } catch (err) {
           console.error('[smtp] store error', err.message);
         }
@@ -410,10 +583,6 @@ const smtp = new SMTPServer({
         callback();
       });
   },
-});
-
-smtp.listen(SMTP_PORT, () => {
-  console.log(`[smtp] listening on port ${SMTP_PORT}`);
 });
 
 // --- REST API ---
@@ -428,21 +597,26 @@ app.get('/health', async (req, res) => {
       relay: RELAY_STATUS.status,
       webhook: WEBHOOK_URL ? 'configured' : 'disabled',
       addressTtlHours: ADDRESS_TTL_HOURS,
+      retentionDays: RETENTION_DAYS,
+      deadLetters: deadLetters.length,
+      retryQueue: retryQueue.length,
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// Create a new email address
-app.post('/api/addresses', auth, (req, res) => {
+// Create a new email address. BOTH creation limits apply: the per-IP
+// per-minute limit (middleware) and the global hourly quota (handler).
+app.post('/api/addresses', auth, addressRateLimit, (req, res) => {
   if (rateLimitExceeded('create:global', ADDRESS_CREATE_MAX_PER_HOUR)) {
     res.setHeader('Retry-After', '3600');
     return res.status(429).json({ ok: false, error: 'Address creation rate limit exceeded. Try again later.' });
   }
   let prefix = String(req.body.prefix || `agent${Date.now().toString(36)}`)
     .toLowerCase()
-    .replace(/[^a-z0-9._-]/g, '');
+    .replace(/[^a-z0-9._-]/g, '')
+    .slice(0, 64);
   // Fall back to a generated prefix if the sanitized input is empty
   if (!prefix) prefix = `agent${Date.now().toString(36)}`;
   const address = `${prefix}@${DOMAIN}`;
@@ -468,15 +642,24 @@ app.get('/api/addresses', auth, async (req, res) => {
 });
 
 // List emails for an address, with pagination + search.
-// Query: page (1-based), per_page (max 100), q (subject/from/body), from
+// Pagination: page/per_page (1-based) OR limit/offset (limit/offset win if
+// present). Search: q (subject/from/body), from (sender substring).
+// List items carry the attachment count under BOTH `attachments` (number,
+// origin shape) and `attachmentCount` (quota shape).
 app.get('/api/inbox/:address', auth, async (req, res) => {
   try {
     const addr = decodeURIComponent(req.params.address).toLowerCase();
-    const { emails, total, page, perPage, pages } = await listEmails(addr, {
+    if (!validAddressParam(addr)) {
+      return res.status(400).json({ ok: false, error: 'Invalid address format' });
+    }
+    const hasLimitOffset = req.query.limit !== undefined || req.query.offset !== undefined;
+    const { emails, total, page, perPage, pages, limit, offset } = await listEmails(addr, {
       q: req.query.q,
       from: req.query.from,
       page: req.query.page,
       perPage: req.query.per_page,
+      limit: hasLimitOffset ? req.query.limit : undefined,
+      offset: hasLimitOffset ? req.query.offset : undefined,
     });
     res.json({
       ok: true,
@@ -486,11 +669,14 @@ app.get('/api/inbox/:address', auth, async (req, res) => {
       page,
       perPage,
       pages,
+      limit,
+      offset,
       emails: emails.map(e => ({
         id: e.id,
         from: e.from,
         subject: e.subject,
         date: e.date,
+        attachments: (e.attachments || []).length,
         attachmentCount: (e.attachments || []).length,
       })),
     });
@@ -503,6 +689,9 @@ app.get('/api/inbox/:address', auth, async (req, res) => {
 app.get('/api/inbox/:address/:id', auth, async (req, res) => {
   try {
     const addr = decodeURIComponent(req.params.address).toLowerCase();
+    if (!validAddressParam(addr)) {
+      return res.status(400).json({ ok: false, error: 'Invalid address format' });
+    }
     const email = await getEmail(addr, req.params.id);
     if (!email) return res.status(404).json({ ok: false, error: 'Not found' });
     res.json({ ok: true, email });
@@ -511,25 +700,46 @@ app.get('/api/inbox/:address/:id', auth, async (req, res) => {
   }
 });
 
-// Poll for verification link (newest email matching sender filter)
+// Poll for verification link (newest email matching sender filter) — immediate.
 app.get('/api/verify-link/:address', auth, async (req, res) => {
   try {
     const addr = decodeURIComponent(req.params.address).toLowerCase();
-    const fromFilter = (req.query.from || '').toLowerCase();
-    const { emails } = await listEmails(addr, { from: fromFilter, perPage: 50 }); // newest first
-    const candidates = emails;
-    for (let i = 0; i < candidates.length; i++) {
-      const verifyLinks = candidates[i].links.filter(u =>
-        /verif|confirm|activate|validate/i.test(u)
-      );
-      if (verifyLinks.length > 0) {
-        return res.json({ ok: true, url: verifyLinks[0], emailId: candidates[i].id });
-      }
-      if (candidates[i].links.length > 0) {
-        return res.json({ ok: true, url: candidates[i].links[0], emailId: candidates[i].id });
-      }
+    if (!validAddressParam(addr)) {
+      return res.status(400).json({ ok: false, error: 'Invalid address format' });
     }
+    const fromFilter = (req.query.from || '').toLowerCase();
+    const { emails } = await listEmails(addr, { perPage: 50 }); // newest first
+    const found = findVerifyLink(emails, fromFilter);
+    if (found) return res.json({ ok: true, ...found });
     res.json({ ok: false, error: 'No verification email yet' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Long-poll for a verification link: waits up to timeoutMs (default 30s,
+// max 120s) instead of requiring the caller to busy-poll.
+app.get('/api/verify-link/:address/wait', auth, async (req, res) => {
+  try {
+    const addr = decodeURIComponent(req.params.address).toLowerCase();
+    if (!validAddressParam(addr)) {
+      return res.status(400).json({ ok: false, error: 'Invalid address format' });
+    }
+    const fromFilter = (req.query.from || '').toLowerCase();
+    const timeoutMs = Math.min(120000, Math.max(1000, Number(req.query.timeoutMs) || 30000));
+    const startedAt = Date.now();
+    const deadline = startedAt + timeoutMs;
+    for (;;) {
+      const { emails } = await listEmails(addr, { perPage: 50 });
+      const found = findVerifyLink(emails, fromFilter);
+      if (found) {
+        return res.json({ ok: true, waitedMs: Math.round(Date.now() - startedAt), ...found });
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await sleep(Math.min(2000, remaining));
+    }
+    res.json({ ok: false, error: 'Timed out waiting for verification email', timeoutMs });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -539,11 +749,19 @@ app.get('/api/verify-link/:address', auth, async (req, res) => {
 app.delete('/api/inbox/:address', auth, async (req, res) => {
   try {
     const addr = decodeURIComponent(req.params.address).toLowerCase();
+    if (!validAddressParam(addr)) {
+      return res.status(400).json({ ok: false, error: 'Invalid address format' });
+    }
     await clearInbox(addr);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+// Dead-letter log: emails that exhausted the store retry budget.
+app.get('/api/dead-letters', auth, (req, res) => {
+  res.json({ ok: true, count: deadLetters.length, deadLetters: deadLetters.slice(-50) });
 });
 
 // --- Local-only dashboard: browse addresses and inboxes in a browser ---
@@ -620,6 +838,24 @@ if(sessionStorage.getItem('amt')){document.getElementById('app').style.display='
 </script></body></html>`);
 });
 
-app.listen(PORT, () => {
-  console.log(`[api] listening on port ${PORT}, domain=${DOMAIN}`);
-});
+// Only bind listeners when run directly; requiring this file (unit tests)
+// must not start servers.
+if (require.main === module) {
+  smtp.listen(SMTP_PORT, () => {
+    console.log(`[smtp] listening on port ${SMTP_PORT}`);
+  });
+
+  app.listen(PORT, () => {
+    console.log(`[api] listening on port ${PORT}, domain=${DOMAIN}`);
+  });
+}
+
+module.exports = {
+  app,
+  extractLinks,
+  extractAttachments,
+  findVerifyLink,
+  validAddressParam,
+  backoffMs,
+  sweepExpiredAddresses,
+};

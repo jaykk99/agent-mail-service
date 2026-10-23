@@ -16,6 +16,11 @@
  *   - local /dashboard HTML UI (unauthenticated page, token client-side only)
  *   - address TTL auto-cleanup sweep on a short-TTL server
  *   - address-creation 429 + per-address SMTP receive rate limits
+ *   - (merged from origin) invalid address param 400, prefix truncation to 64
+ *   - (merged from origin) inbox pagination via limit/offset
+ *   - (merged from origin) verify-link long-poll /wait (immediate + timeout)
+ *   - (merged from origin) dead-letters endpoint + retention health fields
+ *   - (merged from origin) per-minute address-creation rate limit server
  *
  * Local-only: never touches Supabase, the network, or real mail.
  * The webhook test uses a loopback HTTP listener; nothing leaves the box.
@@ -219,6 +224,78 @@ async function waitForHealth(child, timeoutMs = 15000) {
       assert.equal(j.count, 0);
     });
 
+    // --- Merged from origin: validation hardening ---
+    await test('invalid address param returns 400', async () => {
+      const r = await fetch(`${BASE}/api/inbox/${encodeURIComponent('not-an-address')}`, { headers });
+      assert.equal(r.status, 400);
+      assert.equal((await r.json()).ok, false);
+    });
+
+    await test('long prefixes are truncated to 64 chars', async () => {
+      const r = await fetch(`${BASE}/api/addresses`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ prefix: 'a'.repeat(100) }),
+      });
+      const j = await r.json();
+      assert.equal(r.status, 200);
+      assert.equal(j.address.split('@')[0].length, 64);
+    });
+
+    // --- Merged from origin: limit/offset pagination style ---
+    // (Unified server supports BOTH this and page/per_page; list items carry
+    // the attachment count under both `attachments` and `attachmentCount`.)
+    await test('inbox pagination honors limit and offset', async () => {
+      const pr = await fetch(`${BASE}/api/addresses`, { method: 'POST', headers, body: JSON.stringify({ prefix: 'paged' }) });
+      const paged = (await pr.json()).address;
+      for (let i = 0; i < 3; i++) {
+        await smtpSend({ to: paged, from: 's@x.com', subject: `Mail ${i}`, body: 'hi' });
+        await new Promise(r => setTimeout(r, 300));
+      }
+      const page1 = await (await fetch(`${BASE}/api/inbox/${encodeURIComponent(paged)}?limit=2&offset=0`, { headers })).json();
+      assert.equal(page1.count, 2);
+      assert.equal(page1.total, 3);
+      assert.equal(page1.limit, 2);
+      assert.equal(page1.offset, 0);
+      assert.equal(page1.emails[0].subject, 'Mail 2', 'newest first');
+      const page2 = await (await fetch(`${BASE}/api/inbox/${encodeURIComponent(paged)}?limit=2&offset=2`, { headers })).json();
+      assert.equal(page2.count, 1);
+      assert.equal(page2.emails[0].subject, 'Mail 0');
+      assert.ok(typeof page1.emails[0].attachments === 'number', 'list view carries attachment count (attachments)');
+      assert.ok(typeof page1.emails[0].attachmentCount === 'number', 'list view carries attachment count (attachmentCount)');
+    });
+
+    // --- Merged from origin: verify-link long-poll ---
+    await test('verify-link wait returns immediately when mail exists', async () => {
+      // (the earlier inbox was cleared, so send fresh mail first)
+      await smtpSend({
+        to: address, from: 'verify@provider.example.com', subject: 'Confirm',
+        body: `go here: ${verifyUrl}`,
+      });
+      await new Promise(r => setTimeout(r, 500));
+      const w = await (await fetch(`${BASE}/api/verify-link/${encodeURIComponent(address)}/wait?from=provider.example.com&timeoutMs=5000`, { headers })).json();
+      assert.equal(w.ok, true);
+      assert.equal(w.url, verifyUrl);
+      assert.ok(w.waitedMs < 5000);
+    });
+
+    await test('verify-link wait times out on an empty inbox', async () => {
+      const pr = await fetch(`${BASE}/api/addresses`, { method: 'POST', headers, body: JSON.stringify({ prefix: 'empty-wait' }) });
+      const emptyAddr = (await pr.json()).address;
+      const start = Date.now();
+      const w = await (await fetch(`${BASE}/api/verify-link/${encodeURIComponent(emptyAddr)}/wait?timeoutMs=1200`, { headers })).json();
+      assert.equal(w.ok, false);
+      assert.ok(Date.now() - start >= 1000, 'waited at least ~1s');
+    });
+
+    // --- Merged from origin: dead letters ---
+    await test('dead-letters endpoint is empty in a healthy run', async () => {
+      const r = await fetch(`${BASE}/api/dead-letters`, { headers });
+      const j = await r.json();
+      assert.equal(r.status, 200);
+      assert.equal(j.ok, true);
+      assert.equal(j.count, 0);
+    });
+
     // --- New: pagination + search ---
     let pageAddr;
     await test('pagination and search over inbox', async () => {
@@ -338,12 +415,16 @@ async function waitForHealth(child, timeoutMs = 15000) {
       assert.ok(text.includes('sessionStorage'), 'dashboard should keep the token client-side only');
     });
 
-    // --- New: health exposes new status fields ---
+    // --- New: health exposes new status fields (union of both sides) ---
     await test('health reports relay/webhook/ttl status', async () => {
       const j = await (await fetch(`${BASE}/health`)).json();
       assert.ok(['unconfigured', 'configured', 'misconfigured'].includes(j.relay), `relay: ${j.relay}`);
       assert.equal(j.webhook, 'configured');
       assert.equal(typeof j.addressTtlHours, 'number');
+      // merged from origin
+      assert.equal(j.retentionDays, 7);
+      assert.equal(j.deadLetters, 0);
+      assert.equal(j.retryQueue, 0);
     });
 
     // --- TTL sweep on a dedicated short-lived server ---
@@ -428,6 +509,30 @@ async function waitForHealth(child, timeoutMs = 15000) {
         assert.equal(inbox.total, 2, `expected 2 stored, got ${inbox.total}`);
       } finally {
         rc.kill('SIGTERM');
+      }
+    });
+
+    // --- Merged from origin: per-minute address-creation rate limit ---
+    await test('address creation is rate-limited per minute (RATE_LIMIT_PER_MINUTE)', async () => {
+      const P2 = 3311, S2 = 2527;
+      const child2 = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
+        env: { ...process.env, PORT: String(P2), SMTP_PORT: String(S2), AGENT_MAIL_TOKEN: TOKEN, MAIL_DOMAIN: DOMAIN, RATE_LIMIT_PER_MINUTE: '2' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      try {
+        const base2 = `http://127.0.0.1:${P2}`;
+        const start = Date.now();
+        while (Date.now() - start < 15000) {
+          try { const r = await fetch(`${base2}/health`); if (r.ok) break; } catch { /* not up */ }
+          await new Promise(r => setTimeout(r, 200));
+        }
+        const mk = () => fetch(`${base2}/api/addresses`, { method: 'POST', headers, body: '{}' });
+        assert.equal((await mk()).status, 200);
+        assert.equal((await mk()).status, 200);
+        assert.equal((await mk()).status, 429, 'third request within the minute must be rejected');
+      } finally {
+        child2.kill('SIGKILL');
+        await new Promise(r => setTimeout(r, 500));
       }
     });
   } finally {
