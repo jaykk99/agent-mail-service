@@ -804,7 +804,7 @@ async function j(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}
 async function loadAddrs(){
  const d=await j(await fetch('/api/addresses',{headers:H()}));
  document.getElementById('addrs').innerHTML='<table><tr><th>Address</th><th>Emails</th><th>Created</th><th>Last seen</th></tr>'+
- d.addresses.map(a=>'<tr><td><a onclick="loadInbox(\\''+a.address+'\\',1)">'+a.address+'</a></td><td>'+a.emails+'</td><td>'+a.createdAt+'</td><td>'+a.lastSeenAt+'</td></tr>').join('')+'</table>';
+ d.addresses.map(a=>'<tr><td><a onclick="loadInbox(\\''+a.address+'\\',1)">'+esc(a.address)+'</a></td><td>'+esc(a.emails)+'</td><td>'+esc(a.createdAt)+'</td><td>'+esc(a.lastSeenAt)+'</td></tr>').join('')+'</table>';
 }
 async function loadInbox(addr,p){
  current=addr;page=p||1;
