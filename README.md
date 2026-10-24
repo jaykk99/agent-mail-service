@@ -11,6 +11,13 @@ temp-mail services.
   - **SMTP server** (default port 2525) receives incoming mail and parses it
     with `mailparser`, extracting subject, text body, URLs, and attachment
     metadata. Messages over 10 MB are rejected.
+  - **HTTP inbound** (`POST /api/inbound`) accepts parsed mail as JSON
+    `{ to, from, subject, text, html }` from the Cloudflare Email Worker.
+    This is the path internet mail actually takes in production: Render web
+    services cannot expose the SMTP port publicly, so Cloudflare Email
+    Routing receives at the MX and the worker delivers over HTTPS. Auth is
+    `Bearer $AGENT_MAIL_INBOUND_SECRET` (falling back to the API token when
+    the secret is unset); both stores land in the same inbox store.
   - **REST API** (default port 3000, Bearer-token auth, 50 KB request-body
     cap) lists inboxes, fetches full emails, polls or long-polls for
     verification links, and clears inboxes. Requests are logged as
@@ -44,6 +51,7 @@ validated (`local@domain` shape, max 254 chars); malformed ones get a 400.
 | Method | Endpoint | Purpose |
 |---|---|---|
 | GET | `/health` | `{ ok, domain, storage, addresses, relay, webhook, addressTtlHours, retentionDays, deadLetters, retryQueue }` (no auth) |
+| POST | `/api/inbound` | Worker delivery only: `{ to, from, subject, text, html }` -> `{ ok, stored, id? }` (Bearer inbound secret) |
 | POST | `/api/addresses` | `{ prefix }` -> `{ address }` (rate limited, prefix max 64 chars) |
 | GET | `/api/addresses` | known addresses with inbox counts + created/last-seen |
 | GET | `/api/inbox/:address` | paginated, searchable email list (see below) |
@@ -117,6 +125,7 @@ attachmentCount }`, where the last two are the same attachment count
 | `PORT` | no | API port (Render injects its own) |
 | `SMTP_PORT` | no | SMTP listener, default 2525 |
 | `AGENT_MAIL_TOKEN` | yes (prod) | long random Bearer token |
+| `AGENT_MAIL_INBOUND_SECRET` | yes (prod) | Bearer secret for `POST /api/inbound`; same value as error-inbox's `AGENT_MAIL_INBOUND_SECRET` and the worker's `INBOUND_SECRET` |
 | `MAIL_DOMAIN` | yes (prod) | domain used when minting addresses |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` | yes (prod) | persistent storage |
 | `RETENTION_DAYS` | no | in-memory mail older than this is pruned (default 7) |
@@ -130,8 +139,11 @@ attachmentCount }`, where the last two are the same attachment count
 
 ## Pending (needs Jay)
 
-- **DNS/MX**: DigitalPlat free-domain registration + MX records pointing at
-  this service so it can actually receive mail.
+- **DNS/MX**: a domain on Cloudflare with Email Routing enabled and the
+  catch-all routed to the `agent-mail` Email Worker (see error-inbox
+  `docs/AGENT-MAIL.md`); the worker delivers here over `POST /api/inbound`.
+  (The old DigitalPlat free-domain plan is dead — its verification code
+  expired 2026-10-11.)
 - **Mail env vars**: `AGENT_MAIL_TOKEN`, `MAIL_DOMAIN`, and the Supabase
   keys on the Render service.
 

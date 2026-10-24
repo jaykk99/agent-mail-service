@@ -8,6 +8,7 @@
 
 const assert = require('node:assert/strict');
 const {
+  htmlToText,
   extractLinks,
   extractAttachments,
   findVerifyLink,
@@ -38,6 +39,16 @@ test('extractLinks dedupes and skips non-urls', () => {
 
 test('extractLinks returns [] for empty text', () => {
   assert.deepEqual(extractLinks(''), []);
+});
+
+test('htmlToText strips tags, styles and scripts, decodes entities', () => {
+  const html = '<style>.a{color:red}</style><p>Hello&nbsp;<b>World</b> &amp; friends</p><script>alert(1)</script>';
+  assert.equal(htmlToText(html), 'Hello World & friends');
+});
+
+test('htmlToText handles empty input', () => {
+  assert.equal(htmlToText(''), '');
+  assert.equal(htmlToText(undefined), '');
 });
 
 test('extractAttachments records metadata only', () => {

@@ -39,6 +39,7 @@ const PORT = 3310;
 const SMTP_PORT = 2526;
 const TOKEN = 'test-token-abc123';
 const DOMAIN = 'mail.example.test';
+const INBOUND_SECRET = 'test-inbound-secret-xyz';
 const BASE = `http://127.0.0.1:${PORT}`;
 
 // Incoming-mail webhook listener: collects deliveries with raw bodies so
@@ -117,6 +118,7 @@ async function waitForHealth(child, timeoutMs = 15000) {
     env: {
       ...process.env, PORT: String(PORT), SMTP_PORT: String(SMTP_PORT),
       AGENT_MAIL_TOKEN: TOKEN, MAIL_DOMAIN: DOMAIN,
+      AGENT_MAIL_INBOUND_SECRET: INBOUND_SECRET,
       INCOMING_WEBHOOK_URL: `http://127.0.0.1:${WH_PORT}/hook`,
       INCOMING_WEBHOOK_SECRET: WH_SECRET,
     },
@@ -215,6 +217,76 @@ async function waitForHealth(child, timeoutMs = 15000) {
     await test('unknown email id returns 404', async () => {
       const r = await fetch(`${BASE}/api/inbox/${encodeURIComponent(address)}/nope`, { headers });
       assert.equal(r.status, 404);
+    });
+
+    await test('HTTP inbound rejects missing and wrong bearer', async () => {
+      const payload = { to: `httpin@${DOMAIN}`, from: 'a@b.co', subject: 'x', text: 'y' };
+      const noAuth = await fetch(`${BASE}/api/inbound`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
+      });
+      assert.equal(noAuth.status, 401);
+      // The API token must NOT work when a dedicated inbound secret is set.
+      const wrong = await fetch(`${BASE}/api/inbound`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify(payload),
+      });
+      assert.equal(wrong.status, 401);
+    });
+
+    await test('HTTP inbound stores mail, fetchable via inbox + verify-link APIs', async () => {
+      const to = `httpin@${DOMAIN}`;
+      const r = await fetch(`${BASE}/api/inbound`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${INBOUND_SECRET}` },
+        body: JSON.stringify({
+          to, from: 'verify@provider.example.com', subject: 'Your code',
+          text: 'Your code is 731204. Confirm: https://example.com/confirm?c=731204.',
+          html: '<p>Your code is <b>731204</b></p>',
+        }),
+      });
+      const j = await r.json();
+      assert.equal(r.status, 200);
+      assert.equal(j.ok, true);
+      assert.equal(j.stored, true);
+      assert.ok(j.id);
+      const list = await (await fetch(`${BASE}/api/inbox/${encodeURIComponent(to)}`, { headers })).json();
+      assert.equal(list.count, 1);
+      assert.equal(list.emails[0].subject, 'Your code');
+      const full = await (await fetch(`${BASE}/api/inbox/${encodeURIComponent(to)}/${j.id}`, { headers })).json();
+      assert.ok(full.email.text.includes('731204'));
+      assert.ok(full.email.links.includes('https://example.com/confirm?c=731204'));
+      const vl = await (await fetch(`${BASE}/api/verify-link/${encodeURIComponent(to)}`, { headers })).json();
+      assert.equal(vl.url, 'https://example.com/confirm?c=731204');
+    });
+
+    await test('HTTP inbound drops mail for other domains without error', async () => {
+      const r = await fetch(`${BASE}/api/inbound`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${INBOUND_SECRET}` },
+        body: JSON.stringify({ to: 'someone@elsewhere.test', from: 'a@b.co', subject: 'x', text: 'y' }),
+      });
+      const j = await r.json();
+      assert.equal(r.status, 200);
+      assert.equal(j.stored, false);
+    });
+
+    await test('HTTP inbound html-only body falls back to stripped text', async () => {
+      const to = `htmlonly@${DOMAIN}`;
+      const r = await fetch(`${BASE}/api/inbound`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${INBOUND_SECRET}` },
+        body: JSON.stringify({
+          to, from: 'a@b.co', subject: 'HTML only',
+          html: '<html><body><p>Reset here: <a href="https://example.com/reset?t=9">Reset</a></p></body></html>',
+        }),
+      });
+      const j = await r.json();
+      assert.equal(j.stored, true);
+      const full = await (await fetch(`${BASE}/api/inbox/${encodeURIComponent(to)}/${j.id}`, { headers })).json();
+      assert.ok(full.email.text.includes('Reset here'));
+      assert.ok(!full.email.text.includes('<a href'));
+      assert.ok(full.email.links.includes('https://example.com/reset?t=9'));
     });
 
     await test('delete clears the inbox', async () => {
