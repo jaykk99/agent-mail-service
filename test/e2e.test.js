@@ -194,6 +194,28 @@ async function waitForHealth(child, timeoutMs = 15000) {
       assert.ok(!('text' in j.emails[0]), 'list view must not include body text');
     });
 
+    // --- New: malformed recipient addresses are rejected, not registered ---
+    // RFC 5322 allows a quoted-string local part containing characters like
+    // ' " < > that would corrupt the dashboard's HTML/JS if registered and
+    // rendered verbatim. The To: header inside DATA (not the RCPT TO
+    // envelope) is what gets parsed and registered, so a sender fully
+    // controls it — the server must filter on shape before trusting it.
+    await test('malformed To: header addresses are not registered or stored', async () => {
+      const before = await (await fetch(`${BASE}/api/addresses`, { headers })).json();
+      const beforeCount = before.count;
+      const raw = [
+        'From: attacker@evil.test',
+        `To: "bad'); alert(1); //"@evil.test`,
+        'Subject: injection attempt', '', 'payload', '',
+      ].join('\r\n');
+      await smtpSend({ to: `${address}`, from: 'attacker@evil.test', subject: 'x', body: 'x', raw });
+      await new Promise(r => setTimeout(r, 500));
+      const after = await (await fetch(`${BASE}/api/addresses`, { headers })).json();
+      assert.ok(!after.addresses.some(a => a.address.includes("'") || a.address.includes('<') || a.address.includes('"')),
+        `a malformed address was registered: ${JSON.stringify(after.addresses.map(a => a.address))}`);
+      assert.equal(after.count, beforeCount, 'malformed-To mail must not register a new address');
+    });
+
     await test('full email fetch includes links with trailing punctuation trimmed', async () => {
       const list = await (await fetch(`${BASE}/api/inbox/${encodeURIComponent(address)}`, { headers })).json();
       const id = list.emails[0].id;

@@ -121,12 +121,29 @@ const inboxes = new Map();
 // --- Address registry: tracks creation/last activity for TTL cleanup ---
 // address -> { createdAt, lastSeenAt } (ISO strings)
 const addressRegistry = new Map();
+// Hard ceiling independent of the TTL sweep: well-formed-but-unsolicited
+// mail (spam/backscatter to random valid-looking prefixes) would otherwise
+// grow this map without bound in between sweeps, or indefinitely if
+// ADDRESS_TTL_HOURS=0. When full, evict the least-recently-seen address to
+// make room rather than reject the new one, which would silently drop mail.
+const MAX_TRACKED_ADDRESSES = numEnv('MAX_TRACKED_ADDRESSES', 10000);
 
 function registerAddress(address) {
   const now = new Date().toISOString();
   const entry = addressRegistry.get(address);
-  if (entry) entry.lastSeenAt = now;
-  else addressRegistry.set(address, { createdAt: now, lastSeenAt: now });
+  if (entry) { entry.lastSeenAt = now; return; }
+  if (addressRegistry.size >= MAX_TRACKED_ADDRESSES) {
+    let oldestAddr = null, oldestSeen = null;
+    for (const [addr, meta] of addressRegistry) {
+      if (oldestSeen === null || meta.lastSeenAt < oldestSeen) { oldestAddr = addr; oldestSeen = meta.lastSeenAt; }
+    }
+    if (oldestAddr !== null) {
+      addressRegistry.delete(oldestAddr);
+      inboxes.delete(oldestAddr);
+      rateBuckets.delete(`recv:${oldestAddr}`);
+    }
+  }
+  addressRegistry.set(address, { createdAt: now, lastSeenAt: now });
 }
 
 function addressInfo(address) {
@@ -179,6 +196,28 @@ function addressRateLimit(req, res, next) {
   }
   next();
 }
+
+// bucketState (per-IP fixed-window counters) and rateBuckets (sliding-window
+// hit lists) are both keyed by IP/address and never shrink on their own — on
+// a long-running, internet-facing instance that is an unbounded memory leak
+// (every distinct IP that ever hit the service gets a permanent entry).
+// Sweep out anything whose window closed well in the past. This runs on the
+// same cadence as the address TTL sweep, independent of whether that sweep
+// is enabled, since rate-limit state has nothing to do with address TTL.
+function pruneRateLimiters() {
+  const now = Date.now();
+  let removed = 0;
+  for (const [key, entry] of bucketState) {
+    if (now - entry.resetAt > 60 * 60 * 1000) { bucketState.delete(key); removed++; }
+  }
+  for (const [key, hits] of rateBuckets) {
+    const fresh = hits.filter(t => now - t < 60 * 60 * 1000);
+    if (fresh.length) rateBuckets.set(key, fresh);
+    else { rateBuckets.delete(key); removed++; }
+  }
+  return removed;
+}
+setInterval(() => pruneRateLimiters(), 30 * 60 * 1000).unref();
 
 // Globally unique email ids (safe across restarts and storage backends)
 function newId() {
@@ -542,7 +581,18 @@ const smtp = new SMTPServer({
     simpleParser(stream)
       .then(async parsed => {
         try {
-          const toAddrs = (parsed.to?.value || []).map(a => a.address.toLowerCase());
+          const rawToAddrs = (parsed.to?.value || []).map(a => a.address.toLowerCase());
+          // RFC 5322 allows a quoted-string local part that can contain
+          // characters like ' " < > — accepting those verbatim would let a
+          // crafted To: header register an address that breaks out of the
+          // dashboard's HTML/JS when rendered later (stored XSS) and lets
+          // backscatter/spam register unbounded junk addresses. Addresses
+          // this service itself hands out never contain such characters, so
+          // reject anything that does not match that same safe shape instead
+          // of trying to sanitize it.
+          const toAddrs = rawToAddrs.filter(validAddressParam);
+          const rejected = rawToAddrs.length - toAddrs.length;
+          if (rejected > 0) console.warn(`[smtp] rejected ${rejected} malformed recipient address(es)`);
           const links = extractLinks(`${parsed.subject || ''}\n${parsed.text || ''}`);
           const attachments = extractAttachments(parsed);
           for (const addr of toAddrs) {
@@ -600,6 +650,8 @@ app.get('/health', async (req, res) => {
       retentionDays: RETENTION_DAYS,
       deadLetters: deadLetters.length,
       retryQueue: retryQueue.length,
+      trackedAddresses: addressRegistry.size,
+      maxTrackedAddresses: MAX_TRACKED_ADDRESSES,
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -766,75 +818,205 @@ app.get('/api/dead-letters', auth, (req, res) => {
 
 // --- Local-only dashboard: browse addresses and inboxes in a browser ---
 // Token is entered once and kept in sessionStorage; nothing leaves localhost.
+//
+// Every value rendered here can originate from an incoming email (address,
+// from, subject, body, links) and incoming mail is attacker-controlled by
+// definition. All HTML insertion below either goes through esc() or uses
+// data-* attributes read back with getAttribute/dataset (never through
+// string-built onclick="..." handlers, which is how arbitrary data makes it
+// into executable JS even when the visible text looks escaped). Click
+// handling is delegated so no per-row inline script ever runs.
 app.get('/dashboard', (req, res) => {
   res.type('html').send(`<!doctype html>
 <html><head><meta charset="utf-8"><title>Agent Mail Service — local dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-body{font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;margin:0;padding:24px}
-h1{font-size:20px;margin:0 0 16px}h2{font-size:15px;margin:24px 0 8px;color:#9fb4ff}
+body{font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;margin:0;padding:24px;max-width:1000px}
+h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:24px 0 8px;color:#9fb4ff;display:flex;align-items:center;gap:8px}
 table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{border:1px solid #2a2e38;padding:6px 10px;text-align:left;vertical-align:top}
 th{background:#171a21}tr:nth-child(even) td{background:#13151b}
+tr.clickable:hover td{background:#1a2230;cursor:pointer}
 a{color:#7fb3ff;cursor:pointer}a:hover{text-decoration:underline}
-input,button{background:#171a21;color:#e6e6e6;border:1px solid #2a2e38;border-radius:6px;padding:8px 10px;font-size:13px}
-button{cursor:pointer}button:hover{background:#1f2330}
-#login{margin-bottom:16px}.meta{color:#8a93a6;font-size:12px}
-pre{white-space:pre-wrap;background:#13151b;padding:12px;border-radius:6px;border:1px solid #2a2e38}
+input,button,select{background:#171a21;color:#e6e6e6;border:1px solid #2a2e38;border-radius:6px;padding:8px 10px;font-size:13px}
+button{cursor:pointer}button:hover{background:#1f2330}button:disabled{opacity:.5;cursor:default}
+button.danger:hover{background:#3a1d1d;border-color:#6b2c2c;color:#ff9b9b}
+#login{margin-bottom:16px}.meta{color:#8a93a6;font-size:12px}.err{color:#ff8a8a;font-size:12px}
+pre{white-space:pre-wrap;word-break:break-all;background:#13151b;padding:12px;border-radius:6px;border:1px solid #2a2e38;max-height:50vh;overflow:auto}
 .tag{display:inline-block;background:#1d2b1d;color:#9fe09f;border-radius:4px;padding:1px 6px;font-size:11px;margin-left:6px}
+.pill{display:inline-flex;align-items:center;gap:4px;background:#171a21;border:1px solid #2a2e38;border-radius:999px;padding:3px 10px;font-size:12px}
+.pill.ok{color:#9fe09f}.pill.warn{color:#f0c674}.pill.bad{color:#ff9b9b}
+.stats{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.empty{color:#6b7280;font-size:13px;padding:16px;text-align:center;border:1px dashed #2a2e38;border-radius:6px}
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 </style></head><body>
 <h1>Agent Mail Service <span class="meta">local dashboard</span></h1>
 <div id="login"><input id="token" type="password" placeholder="AGENT_MAIL_TOKEN" size="40">
-<button onclick="save()">Use token</button>
-<span class="meta">stored in sessionStorage only</span></div>
+<button id="useTokenBtn">Use token</button>
+<span class="meta">stored in sessionStorage only, never sent anywhere but this server</span>
+<div id="loginErr" class="err"></div></div>
 <div id="app" style="display:none">
-<h2>Addresses</h2><div id="addrs"></div>
+<h2>Status <button id="refreshHealthBtn" title="refresh">&#8635;</button></h2>
+<div id="health" class="stats"><span class="meta">loading…</span></div>
+
+<h2>Addresses <button id="refreshAddrsBtn" title="refresh">&#8635;</button></h2>
+<div id="addrs"><span class="meta">loading…</span></div>
+
 <h2 id="inboxtitle">Inbox</h2>
-<div><input id="q" placeholder="search subject/from/body" size="32">
-<button onclick="loadInbox(current,1)">Search</button>
+<div class="toolbar"><input id="q" placeholder="search subject/from/body" size="28">
+<button id="searchBtn">Search</button>
+<button id="clearInboxBtn" class="danger" disabled>Clear inbox</button>
 <span class="meta" id="pageinfo"></span></div>
-<div id="inbox"></div>
+<div id="inbox"><span class="empty">Select an address above to view its inbox.</span></div>
+
 <h2>Email</h2><div id="email"><span class="meta">click a subject to view</span></div>
+
+<h2>Dead letters <span class="meta" id="dlCount"></span></h2>
+<div id="deadletters"></div>
 </div>
 <script>
 let current=null,page=1;
-function save(){const t=document.getElementById('token').value.trim();if(!t)return;
-sessionStorage.setItem('amt',t);document.getElementById('app').style.display='block';loadAddrs();}
-function H(){return {Authorization:'Bearer '+sessionStorage.getItem('amt')};}
-async function j(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}
-async function loadAddrs(){
- const d=await j(await fetch('/api/addresses',{headers:H()}));
- document.getElementById('addrs').innerHTML='<table><tr><th>Address</th><th>Emails</th><th>Created</th><th>Last seen</th></tr>'+
- d.addresses.map(a=>'<tr><td><a onclick="loadInbox(\\''+a.address+'\\',1)">'+a.address+'</a></td><td>'+a.emails+'</td><td>'+a.createdAt+'</td><td>'+a.lastSeenAt+'</td></tr>').join('')+'</table>';
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function fmtTime(iso){ if(!iso) return ''; const d=new Date(iso); return isNaN(d) ? esc(iso) : d.toLocaleString(); }
+
+function save(){
+ const t=document.getElementById('token').value.trim();
+ document.getElementById('loginErr').textContent='';
+ if(!t)return;
+ sessionStorage.setItem('amt',t);
+ boot();
 }
+function H(){return {Authorization:'Bearer '+sessionStorage.getItem('amt')};}
+async function j(r){
+ if(r.status===401){ sessionStorage.removeItem('amt'); document.getElementById('app').style.display='none';
+  document.getElementById('login').style.display='block';
+  document.getElementById('loginErr').textContent='Token rejected — check AGENT_MAIL_TOKEN and try again.';
+  throw new Error('unauthorized'); }
+ if(!r.ok)throw new Error('HTTP '+r.status);
+ return r.json();
+}
+
+async function boot(){
+ document.getElementById('login').style.display='none';
+ document.getElementById('app').style.display='block';
+ await Promise.all([loadHealth(), loadAddrs()]);
+}
+
+async function loadHealth(){
+ const box=document.getElementById('health');
+ try{
+  const d=await j(await fetch('/health'));
+  const pill=(cls,label)=>'<span class="pill '+cls+'">'+esc(label)+'</span>';
+  const parts=[
+   pill(d.ok?'ok':'bad', 'storage: '+d.storage),
+   pill(d.relay==='configured'?'ok':d.relay==='misconfigured'?'bad':'warn', 'relay: '+d.relay),
+   pill(d.webhook==='configured'?'ok':'warn', 'webhook: '+d.webhook),
+   pill(d.deadLetters>0?'warn':'ok', d.deadLetters+' dead letter'+(d.deadLetters===1?'':'s')),
+   pill(d.retryQueue>0?'warn':'ok', d.retryQueue+' retrying'),
+   pill('ok', d.trackedAddresses+'/'+d.maxTrackedAddresses+' addresses tracked'),
+   pill('ok', 'TTL '+(d.addressTtlHours>0 ? d.addressTtlHours+'h' : 'off')),
+  ];
+  box.innerHTML=parts.join('');
+  document.getElementById('dlCount').textContent='('+d.deadLetters+')';
+  await loadDeadLetters();
+ }catch(e){ box.innerHTML='<span class="err">failed to load /health: '+esc(e.message)+'</span>'; }
+}
+
+async function loadDeadLetters(){
+ const box=document.getElementById('deadletters');
+ try{
+  const d=await j(await fetch('/api/dead-letters',{headers:H()}));
+  if(!d.deadLetters.length){ box.innerHTML='<span class="empty">No dead letters — every received email was stored.</span>'; return; }
+  let h='<table><tr><th>Address</th><th>From</th><th>Subject</th><th>Error</th><th>Died at</th></tr>';
+  for(const dl of d.deadLetters){
+   h+='<tr><td>'+esc(dl.address)+'</td><td>'+esc(dl.from)+'</td><td>'+esc(dl.subject)+'</td><td>'+esc(dl.lastError)+'</td><td>'+fmtTime(dl.deadAt)+'</td></tr>';
+  }
+  box.innerHTML=h+'</table>';
+ }catch(e){ box.innerHTML='<span class="err">failed to load dead letters: '+esc(e.message)+'</span>'; }
+}
+
+async function loadAddrs(){
+ const box=document.getElementById('addrs');
+ box.innerHTML='<span class="meta">loading…</span>';
+ try{
+  const d=await j(await fetch('/api/addresses',{headers:H()}));
+  if(!d.addresses.length){ box.innerHTML='<span class="empty">No addresses yet. Create one via POST /api/addresses, or wait for mail to arrive.</span>'; return; }
+  let h='<table><tr><th>Address</th><th>Emails</th><th>Created</th><th>Last seen</th></tr>';
+  for(const a of d.addresses){
+   h+='<tr class="clickable" data-addr="'+esc(a.address)+'"><td>'+esc(a.address)+'</td><td>'+a.emails+'</td><td>'+fmtTime(a.createdAt)+'</td><td>'+fmtTime(a.lastSeenAt)+'</td></tr>';
+  }
+  box.innerHTML=h+'</table>';
+  // Delegate: each row carries the address in a data-* attribute, read back
+  // via dataset — never interpolated into a JS string that gets executed.
+  box.querySelectorAll('tr[data-addr]').forEach(row=>{
+   row.addEventListener('click', ()=>loadInbox(row.dataset.addr, 1));
+  });
+ }catch(e){ box.innerHTML='<span class="err">failed to load addresses: '+esc(e.message)+'</span>'; }
+}
+
 async function loadInbox(addr,p){
  current=addr;page=p||1;
+ document.getElementById('clearInboxBtn').disabled=false;
  const q=document.getElementById('q').value.trim();
- const d=await j(await fetch('/api/inbox/'+encodeURIComponent(addr)+'?page='+page+'&per_page=20&q='+encodeURIComponent(q),{headers:H()}));
+ const box=document.getElementById('inbox');
+ box.innerHTML='<span class="meta">loading…</span>';
  document.getElementById('inboxtitle').textContent='Inbox: '+addr;
- document.getElementById('pageinfo').textContent='page '+d.page+' of '+d.pages+' ('+d.total+' total)';
- let h='<table><tr><th>From</th><th>Subject</th><th>Date</th><th></th></tr>';
- for(const e of d.emails){
-  h+='<tr><td>'+esc(e.from)+'</td><td><a onclick="viewEmail(\\''+e.id+'\\')">'+esc(e.subject)+'</a>'+(e.attachmentCount?' <span class="tag">'+e.attachmentCount+' att</span>':'')+'</td><td>'+e.date+'</td></tr>';
- }
- h+='</table><div style="margin-top:8px">';
- if(d.page>1)h+='<button onclick="loadInbox(current,'+(d.page-1)+')">Prev</button> ';
- if(d.page<d.pages)h+='<button onclick="loadInbox(current,'+(d.page+1)+')">Next</button>';
- h+='</div>';
- document.getElementById('inbox').innerHTML=h;
+ try{
+  const d=await j(await fetch('/api/inbox/'+encodeURIComponent(addr)+'?page='+page+'&per_page=20&q='+encodeURIComponent(q),{headers:H()}));
+  document.getElementById('pageinfo').textContent='page '+d.page+' of '+d.pages+' ('+d.total+' total)';
+  if(!d.emails.length){ box.innerHTML='<span class="empty">No emails'+(q?' match that search':' yet')+'.</span>'; return; }
+  let h='<table><tr><th>From</th><th>Subject</th><th>Date</th></tr>';
+  for(const e of d.emails){
+   h+='<tr class="clickable" data-id="'+esc(e.id)+'"><td>'+esc(e.from)+'</td><td>'+esc(e.subject)+(e.attachmentCount?' <span class="tag">'+e.attachmentCount+' att</span>':'')+'</td><td>'+fmtTime(e.date)+'</td></tr>';
+  }
+  h+='</table><div style="margin-top:8px" class="toolbar">';
+  h+='<button data-page="'+(d.page-1)+'" '+(d.page<=1?'disabled':'')+'>Prev</button>';
+  h+='<button data-page="'+(d.page+1)+'" '+(d.page>=d.pages?'disabled':'')+'>Next</button>';
+  h+='</div>';
+  box.innerHTML=h;
+  box.querySelectorAll('tr[data-id]').forEach(row=>{
+   row.addEventListener('click', ()=>viewEmail(row.dataset.id));
+  });
+  box.querySelectorAll('button[data-page]').forEach(btn=>{
+   btn.addEventListener('click', ()=>loadInbox(current, Number(btn.dataset.page)));
+  });
+ }catch(e){ box.innerHTML='<span class="err">failed to load inbox: '+esc(e.message)+'</span>'; }
 }
+
 async function viewEmail(id){
- const d=await j(await fetch('/api/inbox/'+encodeURIComponent(current)+'/'+id,{headers:H()}));
- const e=d.email;
- let at='';if(e.attachments&&e.attachments.length){
-  at='<h3>Attachments (metadata only)</h3><table><tr><th>Filename</th><th>Type</th><th>Size</th></tr>'+
-  e.attachments.map(a=>'<tr><td>'+esc(a.filename)+'</td><td>'+esc(a.contentType)+'</td><td>'+a.size+' bytes</td></tr>').join('')+'</table>';
- }
- const links=(e.links||[]).map(u=>'<div><a href="'+u+'" target="_blank" rel="noopener">'+esc(u)+'</a></div>').join('');
- document.getElementById('email').innerHTML='<table><tr><th>From</th><td>'+esc(e.from)+'</td></tr><tr><th>Subject</th><td>'+esc(e.subject)+'</td></tr><tr><th>Date</th><td>'+e.date+'</td></tr></table>'+at+'<h3>Links</h3>'+(links||'<span class="meta">none</span>')+'<h3>Body</h3><pre>'+esc(e.text||'')+'</pre>';
- window.scrollTo(0,document.body.scrollHeight);
+ const box=document.getElementById('email');
+ box.innerHTML='<span class="meta">loading…</span>';
+ try{
+  const d=await j(await fetch('/api/inbox/'+encodeURIComponent(current)+'/'+id,{headers:H()}));
+  const e=d.email;
+  let at='';if(e.attachments&&e.attachments.length){
+   at='<h3>Attachments (metadata only — content is never stored)</h3><table><tr><th>Filename</th><th>Type</th><th>Size</th></tr>'+
+   e.attachments.map(a=>'<tr><td>'+esc(a.filename)+'</td><td>'+esc(a.contentType)+'</td><td>'+a.size+' bytes</td></tr>').join('')+'</table>';
+  }
+  const links=(e.links||[]).map(u=>'<div><a href="'+encodeURI(u)+'" target="_blank" rel="noopener noreferrer">'+esc(u)+'</a></div>').join('');
+  box.innerHTML='<table><tr><th>From</th><td>'+esc(e.from)+'</td></tr><tr><th>Subject</th><td>'+esc(e.subject)+'</td></tr><tr><th>Date</th><td>'+fmtTime(e.date)+'</td></tr></table>'+at+'<h3>Links</h3>'+(links||'<span class="meta">none</span>')+'<h3>Body</h3><pre>'+esc(e.text||'')+'</pre>';
+  window.scrollTo({top:document.body.scrollHeight, behavior:'smooth'});
+ }catch(e){ box.innerHTML='<span class="err">failed to load email: '+esc(e.message)+'</span>'; }
 }
-function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-if(sessionStorage.getItem('amt')){document.getElementById('app').style.display='block';loadAddrs();}
+
+async function clearInbox(){
+ if(!current) return;
+ if(!confirm('Clear all emails for '+current+'? This cannot be undone.')) return;
+ try{
+  await j(await fetch('/api/inbox/'+encodeURIComponent(current),{method:'DELETE',headers:H()}));
+  await loadInbox(current,1);
+  await loadAddrs();
+ }catch(e){ alert('failed to clear inbox: '+e.message); }
+}
+
+document.getElementById('useTokenBtn').addEventListener('click', save);
+document.getElementById('token').addEventListener('keydown', e=>{ if(e.key==='Enter') save(); });
+document.getElementById('refreshHealthBtn').addEventListener('click', loadHealth);
+document.getElementById('refreshAddrsBtn').addEventListener('click', loadAddrs);
+document.getElementById('searchBtn').addEventListener('click', ()=>loadInbox(current,1));
+document.getElementById('q').addEventListener('keydown', e=>{ if(e.key==='Enter') loadInbox(current,1); });
+document.getElementById('clearInboxBtn').addEventListener('click', clearInbox);
+if(sessionStorage.getItem('amt')){ boot(); }
 </script></body></html>`);
 });
 
