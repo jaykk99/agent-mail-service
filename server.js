@@ -42,6 +42,10 @@ const { SMTPServer } = require('smtp-server');
 const { simpleParser } = require('mailparser');
 
 const app = express();
+// The HTTP inbound route (Cloudflare Email Worker deliveries) carries full
+// message bodies, so it gets a larger parser BEFORE the global cap below;
+// express marks the body as parsed and the global parser then skips it.
+app.use('/api/inbound', express.json({ limit: '3mb' }));
 // Bound request bodies so oversized posts can't be used to grow memory.
 app.use(express.json({ limit: '50kb' }));
 
@@ -52,6 +56,10 @@ if (TOKEN === 'dev-token-change-me') {
   console.warn('[security] AGENT_MAIL_TOKEN is the default dev token — set a long random token in production!');
 }
 const DOMAIN = process.env.MAIL_DOMAIN || 'localhost';
+// HTTP inbound (Cloudflare Email Worker) auth: a dedicated secret when set,
+// otherwise the API token. Use the SAME value as AGENT_MAIL_INBOUND_SECRET on
+// error-inbox and INBOUND_SECRET on the worker.
+const INBOUND_SECRET = process.env.AGENT_MAIL_INBOUND_SECRET || '';
 
 function numEnv(name, fallback) {
   const v = Number(process.env[name]);
@@ -493,6 +501,28 @@ function auth(req, res, next) {
   next();
 }
 
+// Constant-time bearer check (mirrors error-inbox's bearerMatches).
+function bearerOk(header, secret) {
+  if (!secret || typeof header !== 'string') return false;
+  const expected = `Bearer ${secret}`;
+  if (header.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(header), Buffer.from(expected));
+}
+
+// Plain-text fallback for worker deliveries that carry only HTML.
+function htmlToText(html) {
+  return String(html || '')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Extract URLs from text, trimming trailing sentence punctuation
 // (e.g. "https://x.com/verify." at the end of a sentence)
 function extractLinks(text) {
@@ -595,6 +625,7 @@ app.get('/health', async (req, res) => {
       storage: useSupabase ? 'supabase' : 'memory',
       addresses: await countAddresses(),
       relay: RELAY_STATUS.status,
+      httpInbound: INBOUND_SECRET ? 'secret' : 'api-token',
       webhook: WEBHOOK_URL ? 'configured' : 'disabled',
       addressTtlHours: ADDRESS_TTL_HOURS,
       retentionDays: RETENTION_DAYS,
@@ -603,6 +634,57 @@ app.get('/health', async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// HTTP inbound: the Cloudflare Email Worker POSTs parsed mail here because
+// Render web services cannot expose the SMTP port publicly, so internet mail
+// can never reach the SMTP listener directly. Auth: Bearer
+// AGENT_MAIL_INBOUND_SECRET when set, else Bearer AGENT_MAIL_TOKEN.
+// Body: { to, from, subject, text, html } — same shape error-inbox accepts,
+// so one worker can deliver to both.
+app.post('/api/inbound', async (req, res) => {
+  if (!bearerOk(req.headers.authorization, INBOUND_SECRET || TOKEN)) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  }
+  const body = req.body || {};
+  const to = typeof body.to === 'string' ? body.to.trim().toLowerCase() : '';
+  if (!validAddressParam(to)) {
+    return res.status(400).json({ ok: false, error: 'Missing or invalid "to".' });
+  }
+  if (!to.endsWith(`@${DOMAIN}`)) {
+    // Not our domain: accept + drop so the worker does not retry it forever.
+    return res.json({ ok: true, stored: false });
+  }
+  registerAddress(to);
+  if (rateLimitExceeded(`recv:${to}`, EMAILS_PER_ADDRESS_PER_HOUR)) {
+    console.warn(`[inbound] per-address receive rate limit hit for ${to}, email dropped`);
+    return res.json({ ok: true, stored: false, error: 'rate-limited' });
+  }
+  const subject = typeof body.subject === 'string' ? body.subject : '';
+  let text = typeof body.text === 'string' ? body.text : '';
+  if (!text && body.html) text = htmlToText(body.html);
+  text = text.slice(0, 10000);
+  // Mine links from the text AND the raw HTML (verification links often live
+  // only in href attributes); the stored body stays text-only, like SMTP.
+  const links = extractLinks(`${subject}\n${text}\n${typeof body.html === 'string' ? body.html : ''}`);
+  try {
+    const record = await storeEmail({
+      address: to,
+      from: typeof body.from === 'string' ? body.from : '',
+      subject,
+      date: new Date().toISOString(),
+      text,
+      links,
+      attachments: [],
+    });
+    fireIncomingWebhook({ address: to, email: record }).catch(() => {});
+    return res.json({ ok: true, stored: true, id: record.id });
+  } catch (err) {
+    // storeEmail already queued a retry; still report failure so the
+    // worker's delivery retry has a chance instead of a silent drop.
+    console.error(`[inbound] store failed for ${to}: ${err.message}`);
+    return res.status(500).json({ ok: false, error: 'store failed' });
   }
 });
 
@@ -852,6 +934,7 @@ if (require.main === module) {
 
 module.exports = {
   app,
+  htmlToText,
   extractLinks,
   extractAttachments,
   findVerifyLink,

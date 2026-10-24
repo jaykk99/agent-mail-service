@@ -13,6 +13,8 @@ services:
         value: "2525"
       - key: AGENT_MAIL_TOKEN
         sync: false # set a long random token in the Render dashboard
+      - key: AGENT_MAIL_INBOUND_SECRET
+        sync: false # same value as AGENT_MAIL_INBOUND_SECRET on error-inbox and INBOUND_SECRET on the Cloudflare Email Worker
       - key: MAIL_DOMAIN
         sync: false # set to the DigitalPlat domain once DNS/MX is live
       - key: SUPABASE_URL
