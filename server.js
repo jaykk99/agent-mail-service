@@ -563,16 +563,33 @@ function sleep(ms) {
 }
 
 // --- SMTP server: receives incoming mail ---
+// Public port 25 is an internet-facing listener, so only accept mail for our
+// own domain (set SMTP_ACCEPT_ANY_DOMAIN=1 to disable, e.g. for local dev).
+const ACCEPT_ANY_DOMAIN = process.env.SMTP_ACCEPT_ANY_DOMAIN === '1';
+
 const smtp = new SMTPServer({
   disabledCommands: ['AUTH', 'STARTTLS'],
   logger: false,
   // Reject absurdly large messages before parsing.
   size: 10 * 1024 * 1024,
+  onRcptTo(address, session, callback) {
+    if (!ACCEPT_ANY_DOMAIN && !address.address.toLowerCase().endsWith(`@${DOMAIN.toLowerCase()}`)) {
+      const err = new Error(`Relaying denied: we only accept mail for @${DOMAIN}`);
+      err.responseCode = 550;
+      return callback(err);
+    }
+    callback();
+  },
   onData(stream, session, callback) {
     simpleParser(stream)
       .then(async parsed => {
         try {
-          const toAddrs = (parsed.to?.value || []).map(a => a.address.toLowerCase());
+          // Envelope recipients are authoritative: catch-all mail is often
+          // addressed via Bcc/lists, so the To header may not name us at all.
+          const envelope = (session.envelope?.rcptTo || []).map(a => a.address.toLowerCase());
+          const toAddrs = envelope.length
+            ? envelope
+            : (parsed.to?.value || []).map(a => a.address.toLowerCase());
           const links = extractLinks(`${parsed.subject || ''}\n${parsed.text || ''}`);
           const attachments = extractAttachments(parsed);
           for (const addr of toAddrs) {
@@ -923,7 +940,12 @@ if(sessionStorage.getItem('amt')){document.getElementById('app').style.display='
 // Only bind listeners when run directly; requiring this file (unit tests)
 // must not start servers.
 if (require.main === module) {
-  smtp.listen(SMTP_PORT, () => {
+  smtp.on('error', err => {
+    console.error(`[smtp] server error: ${err.message}` +
+      (err.code === 'EACCES' ? ' (ports below 1024 need root or CAP_NET_BIND_SERVICE; see README)' : ''));
+    if (err.code === 'EACCES' || err.code === 'EADDRINUSE') process.exit(1);
+  });
+  smtp.listen(SMTP_PORT, process.env.SMTP_HOST || '0.0.0.0', () => {
     console.log(`[smtp] listening on port ${SMTP_PORT}`);
   });
 

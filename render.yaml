@@ -16,7 +16,7 @@ services:
       - key: AGENT_MAIL_INBOUND_SECRET
         sync: false # same value as AGENT_MAIL_INBOUND_SECRET on error-inbox and INBOUND_SECRET on the Cloudflare Email Worker
       - key: MAIL_DOMAIN
-        sync: false # set to the DigitalPlat domain once DNS/MX is live
+        sync: false # NOTE: Render cannot receive SMTP; for real mail use docker-compose.yml (see README)
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_KEY
