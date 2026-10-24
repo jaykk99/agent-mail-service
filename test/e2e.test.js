@@ -196,6 +196,13 @@ async function waitForHealth(child, timeoutMs = 15000) {
       assert.ok(!('text' in j.emails[0]), 'list view must not include body text');
     });
 
+    await test('SMTP rejects recipients outside MAIL_DOMAIN', async () => {
+      await assert.rejects(
+        smtpSend({ to: 'victim@elsewhere.test', from: 'a@b.co', subject: 'x', body: 'y' }),
+        /timed out at step 3/,
+      );
+    });
+
     await test('full email fetch includes links with trailing punctuation trimmed', async () => {
       const list = await (await fetch(`${BASE}/api/inbox/${encodeURIComponent(address)}`, { headers })).json();
       const id = list.emails[0].id;

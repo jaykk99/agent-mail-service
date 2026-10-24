@@ -12,7 +12,7 @@ temp-mail services.
     with `mailparser`, extracting subject, text body, URLs, and attachment
     metadata. Messages over 10 MB are rejected.
   - **HTTP inbound** (`POST /api/inbound`) accepts parsed mail as JSON
-    `{ to, from, subject, text, html }` from the Cloudflare Email Worker.
+    `{ to, from, subject, text, html }` from an optional HTTPS forwarder.
     This is the path internet mail actually takes in production: Render web
     services cannot expose the SMTP port publicly, so Cloudflare Email
     Routing receives at the MX and the worker delivers over HTTPS. Auth is
@@ -137,17 +137,40 @@ attachmentCount }`, where the last two are the same attachment count
 | `INCOMING_WEBHOOK_TIMEOUT_MS` | no | webhook delivery timeout, default 8000 |
 | `SMTP_RELAY_HOST` / `SMTP_RELAY_PORT` / `SMTP_RELAY_USER` / `SMTP_RELAY_PASS` | no | validated at boot, no mail sent |
 
-## Pending (needs Jay)
+## Free self-hosted deployment (no Cloudflare, nothing paid)
 
-- **DNS/MX**: a domain on Cloudflare with Email Routing enabled and the
-  catch-all routed to the `agent-mail` Email Worker (see error-inbox
-  `docs/AGENT-MAIL.md`); the worker delivers here over `POST /api/inbound`.
-  (The old DigitalPlat free-domain plan is dead — its verification code
-  expired 2026-10-11.)
-- **Mail env vars**: `AGENT_MAIL_TOKEN`, `MAIL_DOMAIN`, and the Supabase
-  keys on the Render service.
+Mail arrives straight at this service's own SMTP listener. You need a
+machine with a public IP that accepts inbound port 25, plus a free domain.
 
-Note: Render web services only expose the HTTP port publicly, so external
-MX delivery on SMTP ports cannot reach Render directly — mail must be
-forwarded/relayed to the service's SMTP listener by whatever receives the
-MX traffic.
+1. **Host (free)**: an Oracle Cloud "Always Free" VM, or any box/VPS/home
+   server with a public IP. Open inbound TCP **25, 80, 443** in the cloud
+   firewall/security list *and* the OS firewall. (Outbound 25 may be
+   blocked by hosts; irrelevant, this service only receives.) Render/Railway
+   free web tiers cannot work: they only expose HTTP.
+2. **Domain (free)**: register a subdomain at [duckdns.org](https://www.duckdns.org),
+   e.g. `myagentmail.duckdns.org`, pointed at the host's public IP. No MX
+   record is needed: when a domain has no MX, sending servers deliver to its
+   A record (RFC 5321). With a DNS host that supports MX (e.g. FreeDNS),
+   you can add `MX 10 <your-hostname>` instead.
+3. **Run**:
+   ```sh
+   cp .env.example .env     # set MAIL_DOMAIN=myagentmail.duckdns.org and AGENT_MAIL_TOKEN
+   docker compose up -d     # SMTP on :25, HTTPS API on :443 (free Let's Encrypt cert)
+   ```
+   Without Docker: `SMTP_PORT=25 node server.js` as root (or
+   `setcap cap_net_bind_service=+ep $(which node)`), with the API on `PORT`.
+4. **Test**: `curl https://myagentmail.duckdns.org/health`, create an
+   address via `POST /api/addresses`, send it a mail from any account, then
+   `GET /api/verify-link/<address>/wait`.
+
+Notes:
+- The SMTP listener only accepts recipients `@MAIL_DOMAIN` (550 otherwise),
+  so it is not an open relay. `SMTP_ACCEPT_ANY_DOMAIN=1` disables that
+  check (dev only). `SMTP_HOST` sets the bind address (default `0.0.0.0`).
+- Some sites block signups from free/shared domains. If a provider rejects
+  the DuckDNS address, switch `MAIL_DOMAIN` to another free domain; nothing
+  else changes.
+- `POST /api/inbound` remains as an optional HTTPS delivery path for any
+  forwarder (e.g. an Email Worker) but is not needed for this setup.
+- Persistence: set `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` (free tier) or
+  accept in-memory storage, which is lost on restart.

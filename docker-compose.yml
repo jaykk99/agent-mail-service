@@ -1,0 +1,29 @@
+# Self-hosted stack: no Cloudflare, no paid services.
+#   docker compose up -d
+# Internet port 25 (what other mail servers dial) maps to the container's 2525.
+# Caddy gets a free Let's Encrypt cert for the HTTPS API on 443.
+services:
+  mail:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SMTP_PORT: "2525"
+      PORT: "3000"
+    ports:
+      - "25:2525"
+    expose:
+      - "3000"
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      MAIL_DOMAIN: ${MAIL_DOMAIN}
+    command: caddy reverse-proxy --from ${MAIL_DOMAIN} --to mail:3000
+    volumes:
+      - caddy_data:/data
+volumes:
+  caddy_data:
