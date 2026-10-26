@@ -159,7 +159,7 @@ machine with a public IP that accepts inbound port 25, plus a free domain.
    ```
    Without Docker: `SMTP_PORT=25 node server.js` as root (or
    `setcap cap_net_bind_service=+ep $(which node)`), with the API on `PORT`.
-4. **Test**: `curl https://myagentmail.duckdns.org/health`, create an
+4. **Test**: check the service health endpoint, create an
    address via `POST /api/addresses`, send it a mail from any account, then
    `GET /api/verify-link/<address>/wait`.
 
