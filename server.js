@@ -55,7 +55,9 @@ const TOKEN = process.env.AGENT_MAIL_TOKEN || 'dev-token-change-me';
 if (TOKEN === 'dev-token-change-me') {
   console.warn('[security] AGENT_MAIL_TOKEN is the default dev token — set a long random token in production!');
 }
-const DOMAIN = process.env.MAIL_DOMAIN || 'localhost';
+// Lowercased once: every comparison below is against lowercased addresses, so
+// a MAIL_DOMAIN typed with capitals used to drop all HTTP-inbound mail.
+const DOMAIN = String(process.env.MAIL_DOMAIN || 'localhost').trim().toLowerCase().replace(/^@/, '');
 // HTTP inbound (Cloudflare Email Worker) auth: a dedicated secret when set,
 // otherwise the API token. Use the SAME value as AGENT_MAIL_INBOUND_SECRET on
 // error-inbox and INBOUND_SECRET on the worker.
@@ -148,6 +150,36 @@ function addressInfo(address) {
   };
 }
 
+// --- Arrival events: long-poll waiters wake the instant mail is stored ---
+const { EventEmitter } = require('events');
+const mailEvents = new EventEmitter();
+mailEvents.setMaxListeners(0);
+
+// Resolve on the next stored mail for `address`, or after `ms` (whichever is
+// first). The timer is the fallback for mail stored by another instance.
+function waitForArrival(address, ms) {
+  return new Promise(resolve => {
+    const done = () => { clearTimeout(timer); mailEvents.off(address, done); resolve(); };
+    const timer = setTimeout(done, Math.max(0, ms));
+    mailEvents.once(address, done);
+  });
+}
+
+// --- Duplicate suppression: a forwarder that retries a delivery (or mirrors
+// it over both SMTP and HTTP) must not store the same message twice. Keyed by
+// address + Message-ID; messages without a Message-ID are never deduped. ---
+const seenMessages = new Map(); // key -> stored email id (bounded, oldest evicted)
+const SEEN_MAX = 5000;
+function seenKey(address, messageId) {
+  const id = String(messageId || '').trim().replace(/^<|>$/g, '');
+  return id ? `${address}|${id}` : '';
+}
+function rememberMessage(key, id) {
+  if (!key) return;
+  seenMessages.set(key, id);
+  if (seenMessages.size > SEEN_MAX) seenMessages.delete(seenMessages.keys().next().value);
+}
+
 // --- Sliding-window rate limiter (per key, events per rolling hour) ---
 const rateBuckets = new Map(); // key -> [timestamps]
 
@@ -236,6 +268,7 @@ setInterval(async () => {
     if (i !== -1) retryQueue.splice(i, 1);
     try {
       await storeEmailRaw(job.email);
+      mailEvents.emit(job.email.address);
       console.log(`[storage] retry succeeded for ${job.email.address} (attempt ${job.attempts + 1})`);
     } catch (err) {
       scheduleRetry(job.email, err, job.attempts + 1);
@@ -348,8 +381,14 @@ function toEmailShape(e) {
     from: e.from_addr !== undefined ? e.from_addr : e.from,
     subject: e.subject || '',
     date: e.date || e.created_at || new Date().toISOString(),
+    // When THIS service stored it (the Date header is sender-controlled and
+    // can be skewed); `since` filters compare against this.
+    receivedAt: e.created_at || e.receivedAt || e.date || new Date().toISOString(),
     text: e.text_body !== undefined ? e.text_body : (e.text || ''),
     links: e.links || [],
+    // One-time codes are derived on read (no schema change needed), so mail
+    // stored before this feature existed gets codes too.
+    codes: extractCodes(e.subject || '', e.text_body !== undefined ? e.text_body : (e.text || '')),
     // Attachment METADATA only (filename, type, size) — never content.
     attachments: e.attachments || [],
   };
@@ -387,6 +426,7 @@ async function storeEmailRaw(record) {
   const stored = {
     id: record.id || newId(),
     from, subject, date, text, links, attachments,
+    receivedAt: new Date().toISOString(),
   };
   emails.push(stored);
   // Keep inbox bounded, and prune entries older than the retention window.
@@ -399,7 +439,9 @@ async function storeEmailRaw(record) {
 async function storeEmail(email) {
   const record = { ...email, id: email.id || newId(), attachments: email.attachments || [] };
   try {
-    return await storeEmailRaw(record);
+    const stored = await storeEmailRaw(record);
+    mailEvents.emit(record.address);
+    return stored;
   } catch (err) {
     scheduleRetry(record, err, 1);
     throw err;
@@ -409,7 +451,7 @@ async function storeEmail(email) {
 // Newest first, with optional search + BOTH pagination styles.
 // Precedence: explicit limit/offset win; otherwise page/perPage are used.
 // Returns { emails, total, page, perPage, pages, limit, offset }.
-async function listEmails(address, { q = '', from = '', page, perPage, limit, offset } = {}) {
+async function listEmails(address, { q = '', from = '', since, page, perPage, limit, offset } = {}) {
   q = String(q || '').toLowerCase();
   from = String(from || '').toLowerCase();
 
@@ -437,6 +479,12 @@ async function listEmails(address, { q = '', from = '', page, perPage, limit, of
   }
   if (from) {
     emails = emails.filter(e => String(e.from || '').toLowerCase().includes(from));
+  }
+  if (since) {
+    // "Only mail newer than this" — lets a caller ignore whatever was already
+    // in the inbox before it triggered a new verification email.
+    const t = Date.parse(since);
+    if (!Number.isNaN(t)) emails = emails.filter(e => Date.parse(e.receivedAt || e.date) > t);
   }
   const total = emails.length;
 
@@ -484,18 +532,43 @@ async function clearInbox(address) {
   inboxes.set(address, []);
 }
 
-async function countAddresses() {
+// Every address this service knows about, with mail counts. The in-process
+// registry is lost on restart (Render free instances sleep after 15 idle
+// minutes), so with Supabase the list is rebuilt from stored mail and then
+// merged with addresses created since boot that have no mail yet.
+async function knownAddresses() {
+  const out = new Map(); // address -> { address, createdAt, lastSeenAt, emails }
   if (useSupabase) {
-    const { data, error } = await supabase.from('agent_emails').select('address');
+    const { data, error } = await supabase
+      .from('agent_emails')
+      .select('address, created_at')
+      .order('created_at', { ascending: false })
+      .limit(5000);
     if (error) throw error;
-    return new Set((data || []).map(r => r.address)).size;
+    for (const r of data || []) {
+      const cur = out.get(r.address);
+      if (cur) { cur.emails++; cur.createdAt = r.created_at; }
+      else out.set(r.address, { address: r.address, createdAt: r.created_at, lastSeenAt: r.created_at, emails: 1 });
+    }
   }
-  return inboxes.size;
+  for (const [address, meta] of addressRegistry) {
+    const cur = out.get(address);
+    if (cur) {
+      if (meta.createdAt < cur.createdAt) cur.createdAt = meta.createdAt;
+      if (meta.lastSeenAt > cur.lastSeenAt) cur.lastSeenAt = meta.lastSeenAt;
+    } else {
+      out.set(address, { address, createdAt: meta.createdAt, lastSeenAt: meta.lastSeenAt, emails: (inboxes.get(address) || []).length });
+    }
+  }
+  return [...out.values()].sort((a, b) => (a.lastSeenAt < b.lastSeenAt ? 1 : -1));
+}
+
+async function countAddresses() {
+  return (await knownAddresses()).length;
 }
 
 function auth(req, res, next) {
-  const header = req.headers.authorization || '';
-  if (header !== `Bearer ${TOKEN}`) {
+  if (!bearerOk(req.headers.authorization, TOKEN)) {
     return res.status(401).json({ ok: false, error: 'Unauthorized' });
   }
   next();
@@ -509,25 +582,122 @@ function bearerOk(header, secret) {
   return crypto.timingSafeEqual(Buffer.from(header), Buffer.from(expected));
 }
 
-// Plain-text fallback for worker deliveries that carry only HTML.
-function htmlToText(html) {
-  return String(html || '')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/\s+/g, ' ')
-    .trim();
+// Decode the HTML entities that show up in mail bodies and href values.
+function decodeEntities(str) {
+  return String(str || '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0*39;|&apos;/gi, "'")
+    .replace(/&#x([0-9a-f]{1,6});/gi, (_, h) => safeCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d{1,7});/g, (_, d) => safeCodePoint(parseInt(d, 10)))
+    .replace(/&amp;/gi, '&');
+}
+function safeCodePoint(n) {
+  try { return String.fromCodePoint(n); } catch { return ''; }
 }
 
-// Extract URLs from text, trimming trailing sentence punctuation
-// (e.g. "https://x.com/verify." at the end of a sentence)
-function extractLinks(text) {
-  const matches = String(text || '').match(/https?:\/\/[^\s<>"')]+/g) || [];
-  return [...new Set(matches.map(u => u.replace(/[.,;:!?]+$/, '')))];
+// Plain-text fallback for deliveries that carry only HTML. Block tags become
+// line breaks so a code on its own row stays on its own line.
+function htmlToText(html) {
+  const text = String(html || '')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<(style|script|head|title)\b[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|tr|td|th|h\d|li|table|blockquote)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+  return decodeEntities(text)
+    .replace(/[ \t ​‌‍﻿]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    // Single-line input stays single-line (old behaviour callers rely on).
+    .replace(/^[^\n]*$/, m => m.replace(/\s+/g, ' '));
+}
+
+const URL_RE = /https?:\/\/[^\s<>"')\]]+/g;
+// Never useful to an agent: static assets, tracking pixels, list management.
+const JUNK_LINK = /\.(png|jpe?g|gif|svg|webp|ico|css|js|woff2?|ttf)(\?|#|$)|unsubscribe|list-manage|\/opt-?out|email-preferences|\/preferences|\/pixel|\/open\?|\/track\/open|w3\.org\/|schema\.org/i;
+const SOCIAL_LINK = /^https?:\/\/(www\.)?(facebook|twitter|x|instagram|linkedin|youtube|tiktok|apple|play\.google)\.com\//i;
+const VERIFY_STRONG = /verif|confirm|activat|validat|magic[-_]?link|reset|one[-_]?time|otp|email[-_]?link|\/auth\/|callback|token=|code=|signup\/complete|ticket=/i;
+const VERIFY_WEAK = /sign[-_]?in|log[-_]?in|auth|invite|accept|welcome|continue|complete|click/i;
+
+// Extract URLs. `html` (optional) is mined for href values first, since a
+// verification link often exists ONLY in an <a href> (the visible text says
+// "Verify email"), with entities decoded so `&amp;` does not corrupt the query
+// string. Bare URLs in the text follow; trailing sentence punctuation is
+// trimmed. Order is preserved and duplicates removed.
+function extractLinks(text, html) {
+  const found = [];
+  const add = u => {
+    const url = String(u || '').trim().replace(/[.,;:!?]+$/, '');
+    if (/^https?:\/\/[^\s]+$/i.test(url) && url.length <= 2000 && !found.includes(url)) found.push(url);
+  };
+  if (html) {
+    for (const m of String(html).matchAll(/href\s*=\s*(?:"([^"]+)"|'([^']+)')/gi)) add(decodeEntities(m[1] || m[2]));
+  }
+  for (const m of String(text || '').match(URL_RE) || []) add(m);
+  return found.slice(0, 50);
+}
+
+// Higher = more likely to be THE link the email wants clicked. Junk scores
+// below zero so it is never chosen while any real link exists.
+function scoreLink(url) {
+  if (JUNK_LINK.test(url)) return -10;
+  let score = 0;
+  if (VERIFY_STRONG.test(url)) score += 10;
+  else if (VERIFY_WEAK.test(url)) score += 4;
+  if (SOCIAL_LINK.test(url)) score -= 6;
+  // A long opaque token in the path/query is the signature of a one-off link.
+  if (/[A-Za-z0-9_-]{24,}/.test(url.replace(/^https?:\/\/[^/]+/, ''))) score += 3;
+  // Bare homepage: almost never the action link.
+  if (/^https?:\/\/[^/]+\/?$/.test(url)) score -= 3;
+  return score;
+}
+
+// Best-first ordering of an email's links (stable for equal scores).
+function rankLinks(links) {
+  return (links || [])
+    .map((url, i) => ({ url, i, score: scoreLink(url) }))
+    .sort((a, b) => b.score - a.score || a.i - b.i)
+    .map(x => x.url);
+}
+
+// Pull likely one-time codes from a subject + plain-text body, best first.
+// Pass 1 takes codes on (or right after) a line that mentions a code keyword;
+// pass 2 falls back to any lone 4-8 digit number. Phone numbers, years,
+// currency amounts and URLs are ignored.
+function extractCodes(subject, text) {
+  const hay = `${subject || ''}\n${text || ''}`
+    .replace(URL_RE, ' ')
+    .replace(/\(\d{3}\)\s*\d{3}[-.\s]?\d{4}/g, ' ')
+    .replace(/\+?\d{1,3}[-.\s]\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/g, ' ')
+    .replace(/\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/g, ' ')
+    .replace(/\b\d{3}[-.\s]\d{4}\b/g, ' ')
+    .replace(/[$€£]\s?\d[\d,.]*/g, ' ');
+  const out = [];
+  const push = c => { if (!out.includes(c)) out.push(c); };
+  const isYear = c => c.length === 4 && Number(c) >= 1900 && Number(c) <= 2100;
+  const keyword = /(code|otp|pin\b|verification|verify|one[- ]time|passcode|password|security|confirm)/i;
+  const scan = line => {
+    for (const m of line.matchAll(/\b(\d{3})[\s-](\d{3})\b/g)) push(m[1] + m[2]);
+    for (const m of line.matchAll(/\b\d{4,8}\b/g)) if (!isYear(m[0])) push(m[0]);
+    for (const m of line.matchAll(/\b(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{6,8}\b/g)) push(m[0]);
+  };
+  const lines = hay.split(/\n+/).map(l => l.trim()).filter(Boolean);
+  for (let i = 0; i < lines.length; i++) {
+    if (!keyword.test(lines[i])) continue;
+    scan(lines[i]);
+    // "Your verification code is:" with the code alone on the next line(s).
+    for (const next of lines.slice(i + 1, i + 3)) {
+      if (/^[A-Z0-9][A-Z0-9 -]{2,10}$/.test(next)) scan(next);
+    }
+  }
+  if (!out.length) {
+    for (const m of hay.matchAll(/\b\d{4,8}\b/g)) if (!isYear(m[0])) push(m[0]);
+  }
+  return out.slice(0, 5);
 }
 
 // Attachment metadata only (filename/type/size) — content is not stored.
@@ -539,21 +709,28 @@ function extractAttachments(parsed) {
   }));
 }
 
-// Find the newest verification-style link in a newest-first email list.
+// Find the best verification-style link in a newest-first email list: the
+// highest-scoring link of the newest email that has any usable link. Emails
+// whose only links are junk (logos, unsubscribe) are skipped.
 function findVerifyLink(emails, fromFilter) {
   const candidates = fromFilter
     ? emails.filter(e => String(e.from || '').toLowerCase().includes(fromFilter))
     : emails;
   for (const email of candidates) {
-    const verifyLinks = (email.links || []).filter(u =>
-      /verif|confirm|activate|validate|magic|signin|login|reset|otp|code/i.test(u)
-    );
-    if (verifyLinks.length > 0) {
-      return { url: verifyLinks[0], emailId: email.id };
-    }
-    if (email.links.length > 0) {
-      return { url: email.links[0], emailId: email.id };
-    }
+    const ranked = rankLinks(email.links).filter(u => scoreLink(u) > -10);
+    if (ranked.length > 0) return { url: ranked[0], emailId: email.id };
+  }
+  return null;
+}
+
+// Find the newest one-time code in a newest-first email list.
+function findCode(emails, fromFilter) {
+  const candidates = fromFilter
+    ? emails.filter(e => String(e.from || '').toLowerCase().includes(fromFilter))
+    : emails;
+  for (const email of candidates) {
+    const codes = email.codes || extractCodes(email.subject, email.text);
+    if (codes.length) return { code: codes[0], codes, emailId: email.id, subject: email.subject, from: email.from };
   }
   return null;
 }
@@ -590,10 +767,14 @@ const smtp = new SMTPServer({
           const toAddrs = envelope.length
             ? envelope
             : (parsed.to?.value || []).map(a => a.address.toLowerCase());
-          const links = extractLinks(`${parsed.subject || ''}\n${parsed.text || ''}`);
+          const html = typeof parsed.html === 'string' ? parsed.html : '';
+          const bodyText = parsed.text || (html ? htmlToText(html) : '');
+          const links = extractLinks(`${parsed.subject || ''}\n${bodyText}`, html);
           const attachments = extractAttachments(parsed);
           for (const addr of toAddrs) {
             registerAddress(addr);
+            const dedupeKey = seenKey(addr, parsed.messageId);
+            if (dedupeKey && seenMessages.has(dedupeKey)) continue;
             if (rateLimitExceeded(`recv:${addr}`, EMAILS_PER_ADDRESS_PER_HOUR)) {
               console.warn(`[smtp] per-address receive rate limit hit for ${addr}, email dropped`);
               continue;
@@ -604,10 +785,11 @@ const smtp = new SMTPServer({
                 from: parsed.from?.text || '',
                 subject: parsed.subject || '',
                 date: parsed.date?.toISOString() || new Date().toISOString(),
-                text: (parsed.text || '').slice(0, 10000),
+                text: bodyText.slice(0, 10000),
                 links,
                 attachments,
               });
+              rememberMessage(dedupeKey, record.id);
               // Webhook is fire-and-forget; SMTP accept must not wait on it.
               fireIncomingWebhook({ address: addr, email: record }).catch(() => {});
             } catch (err) {
@@ -673,6 +855,12 @@ app.post('/api/inbound', async (req, res) => {
     // Not our domain: accept + drop so the worker does not retry it forever.
     return res.json({ ok: true, stored: false });
   }
+  // A retried delivery of a message we already stored is acknowledged, not
+  // stored again (needs the forwarder to pass the Message-ID).
+  const dedupeKey = seenKey(to, body.messageId);
+  if (dedupeKey && seenMessages.has(dedupeKey)) {
+    return res.json({ ok: true, stored: true, duplicate: true, id: seenMessages.get(dedupeKey) });
+  }
   registerAddress(to);
   if (rateLimitExceeded(`recv:${to}`, EMAILS_PER_ADDRESS_PER_HOUR)) {
     console.warn(`[inbound] per-address receive rate limit hit for ${to}, email dropped`);
@@ -684,17 +872,20 @@ app.post('/api/inbound', async (req, res) => {
   text = text.slice(0, 10000);
   // Mine links from the text AND the raw HTML (verification links often live
   // only in href attributes); the stored body stays text-only, like SMTP.
-  const links = extractLinks(`${subject}\n${text}\n${typeof body.html === 'string' ? body.html : ''}`);
+  const links = extractLinks(`${subject}\n${text}`, typeof body.html === 'string' ? body.html : '');
+  const sentAt = typeof body.date === 'string' && !Number.isNaN(Date.parse(body.date))
+    ? new Date(body.date).toISOString() : new Date().toISOString();
   try {
     const record = await storeEmail({
       address: to,
       from: typeof body.from === 'string' ? body.from : '',
       subject,
-      date: new Date().toISOString(),
+      date: sentAt,
       text,
       links,
       attachments: [],
     });
+    rememberMessage(dedupeKey, record.id);
     fireIncomingWebhook({ address: to, email: record }).catch(() => {});
     return res.json({ ok: true, stored: true, id: record.id });
   } catch (err) {
@@ -728,12 +919,7 @@ app.post('/api/addresses', auth, addressRateLimit, (req, res) => {
 // List known addresses (registry) with inbox counts
 app.get('/api/addresses', auth, async (req, res) => {
   try {
-    const list = [];
-    for (const addr of addressRegistry.keys()) {
-      const info = addressInfo(addr);
-      if (info) list.push(info);
-    }
-    list.sort((a, b) => (a.lastSeenAt < b.lastSeenAt ? 1 : -1));
+    const list = await knownAddresses();
     res.json({ ok: true, count: list.length, addresses: list });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -755,6 +941,7 @@ app.get('/api/inbox/:address', auth, async (req, res) => {
     const { emails, total, page, perPage, pages, limit, offset } = await listEmails(addr, {
       q: req.query.q,
       from: req.query.from,
+      since: req.query.since,
       page: req.query.page,
       perPage: req.query.per_page,
       limit: hasLimitOffset ? req.query.limit : undefined,
@@ -775,6 +962,10 @@ app.get('/api/inbox/:address', auth, async (req, res) => {
         from: e.from,
         subject: e.subject,
         date: e.date,
+        receivedAt: e.receivedAt,
+        codes: e.codes || [],
+        linkCount: (e.links || []).length,
+        preview: String(e.text || '').replace(/\s+/g, ' ').slice(0, 140),
         attachments: (e.attachments || []).length,
         attachmentCount: (e.attachments || []).length,
       })),
@@ -793,7 +984,9 @@ app.get('/api/inbox/:address/:id', auth, async (req, res) => {
     }
     const email = await getEmail(addr, req.params.id);
     if (!email) return res.status(404).json({ ok: false, error: 'Not found' });
-    res.json({ ok: true, email });
+    // `links` keeps arrival order; `bestLinks` is the same set ranked so the
+    // action link comes first and logos/unsubscribe links come last.
+    res.json({ ok: true, email: { ...email, bestLinks: rankLinks(email.links) } });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -806,8 +999,8 @@ app.get('/api/verify-link/:address', auth, async (req, res) => {
     if (!validAddressParam(addr)) {
       return res.status(400).json({ ok: false, error: 'Invalid address format' });
     }
-    const fromFilter = (req.query.from || '').toLowerCase();
-    const { emails } = await listEmails(addr, { perPage: 50 }); // newest first
+    const fromFilter = String(req.query.from || '').toLowerCase();
+    const { emails } = await listEmails(addr, { perPage: 50, since: req.query.since }); // newest first
     const found = findVerifyLink(emails, fromFilter);
     if (found) return res.json({ ok: true, ...found });
     res.json({ ok: false, error: 'No verification email yet' });
@@ -816,33 +1009,78 @@ app.get('/api/verify-link/:address', auth, async (req, res) => {
   }
 });
 
-// Long-poll for a verification link: waits up to timeoutMs (default 30s,
-// max 120s) instead of requiring the caller to busy-poll.
-app.get('/api/verify-link/:address/wait', auth, async (req, res) => {
+// Shared long-poll loop: re-check the inbox whenever mail arrives for the
+// address (instant, via mailEvents) and at most every 2s otherwise, until
+// `pick(emails)` returns something or the timeout passes.
+async function longPoll(req, res, pick, timeoutError) {
   try {
     const addr = decodeURIComponent(req.params.address).toLowerCase();
     if (!validAddressParam(addr)) {
       return res.status(400).json({ ok: false, error: 'Invalid address format' });
     }
-    const fromFilter = (req.query.from || '').toLowerCase();
+    const fromFilter = String(req.query.from || '').toLowerCase();
+    const since = req.query.since;
+    if (since && Number.isNaN(Date.parse(since))) {
+      return res.status(400).json({ ok: false, error: 'since must be an ISO time' });
+    }
     const timeoutMs = Math.min(120000, Math.max(1000, Number(req.query.timeoutMs) || 30000));
     const startedAt = Date.now();
     const deadline = startedAt + timeoutMs;
+    let closed = false;
+    req.on('close', () => { closed = true; mailEvents.emit(addr); });
     for (;;) {
-      const { emails } = await listEmails(addr, { perPage: 50 });
-      const found = findVerifyLink(emails, fromFilter);
+      const { emails } = await listEmails(addr, { perPage: 50, since });
+      const found = pick(emails, fromFilter);
       if (found) {
         return res.json({ ok: true, waitedMs: Math.round(Date.now() - startedAt), ...found });
       }
       const remaining = deadline - Date.now();
-      if (remaining <= 0) break;
-      await sleep(Math.min(2000, remaining));
+      if (remaining <= 0 || closed) break;
+      await waitForArrival(addr, Math.min(2000, remaining));
     }
-    res.json({ ok: false, error: 'Timed out waiting for verification email', timeoutMs });
+    if (!closed) res.json({ ok: false, error: timeoutError, timeoutMs });
+  } catch (err) {
+    if (!res.headersSent) res.status(500).json({ ok: false, error: err.message });
+  }
+}
+
+// Long-poll for a verification link: waits up to timeoutMs (default 30s,
+// max 120s) instead of requiring the caller to busy-poll.
+app.get('/api/verify-link/:address/wait', auth, (req, res) =>
+  longPoll(req, res, findVerifyLink, 'Timed out waiting for verification email'));
+
+// Newest one-time code for the address (immediate).
+app.get('/api/code/:address', auth, async (req, res) => {
+  try {
+    const addr = decodeURIComponent(req.params.address).toLowerCase();
+    if (!validAddressParam(addr)) {
+      return res.status(400).json({ ok: false, error: 'Invalid address format' });
+    }
+    const { emails } = await listEmails(addr, { perPage: 50, since: req.query.since });
+    const found = findCode(emails, String(req.query.from || '').toLowerCase());
+    if (found) return res.json({ ok: true, ...found });
+    res.json({ ok: false, error: 'No email with a code yet' });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+// Long-poll for a one-time code.
+app.get('/api/code/:address/wait', auth, (req, res) =>
+  longPoll(req, res, findCode, 'Timed out waiting for a code'));
+
+// Long-poll for the next email of any kind: returns the newest matching
+// message in full, with its codes and ranked links, in ONE call. Pass
+// since=<ISO time you triggered the email> to ignore older mail.
+app.get('/api/wait/:address', auth, (req, res) =>
+  longPoll(req, res, (emails, fromFilter) => {
+    const e = fromFilter
+      ? emails.find(x => String(x.from || '').toLowerCase().includes(fromFilter))
+      : emails[0];
+    if (!e) return null;
+    const best = rankLinks(e.links).filter(u => scoreLink(u) > -10);
+    return { email: { ...e, bestLinks: rankLinks(e.links) }, code: (e.codes || [])[0] || null, link: best[0] || null };
+  }, 'Timed out waiting for mail'));
 
 // Clear inbox
 app.delete('/api/inbox/:address', auth, async (req, res) => {
@@ -911,9 +1149,9 @@ async function loadInbox(addr,p){
  const d=await j(await fetch('/api/inbox/'+encodeURIComponent(addr)+'?page='+page+'&per_page=20&q='+encodeURIComponent(q),{headers:H()}));
  document.getElementById('inboxtitle').textContent='Inbox: '+addr;
  document.getElementById('pageinfo').textContent='page '+d.page+' of '+d.pages+' ('+d.total+' total)';
- let h='<table><tr><th>From</th><th>Subject</th><th>Date</th><th></th></tr>';
+ let h='<table><tr><th>From</th><th>Subject</th><th>Code</th><th>Date</th></tr>';
  for(const e of d.emails){
-  h+='<tr><td>'+esc(e.from)+'</td><td><a onclick="viewEmail(\\''+e.id+'\\')">'+esc(e.subject)+'</a>'+(e.attachmentCount?' <span class="tag">'+e.attachmentCount+' att</span>':'')+'</td><td>'+e.date+'</td></tr>';
+  h+='<tr><td>'+esc(e.from)+'</td><td><a onclick="viewEmail(\\''+e.id+'\\')">'+esc(e.subject)+'</a>'+(e.attachmentCount?' <span class="tag">'+e.attachmentCount+' att</span>':'')+'</td><td>'+(e.codes&&e.codes.length?'<span class="tag">'+esc(e.codes[0])+'</span>':'')+'</td><td>'+esc(e.date)+'</td></tr>';
  }
  h+='</table><div style="margin-top:8px">';
  if(d.page>1)h+='<button onclick="loadInbox(current,'+(d.page-1)+')">Prev</button> ';
@@ -928,8 +1166,8 @@ async function viewEmail(id){
   at='<h3>Attachments (metadata only)</h3><table><tr><th>Filename</th><th>Type</th><th>Size</th></tr>'+
   e.attachments.map(a=>'<tr><td>'+esc(a.filename)+'</td><td>'+esc(a.contentType)+'</td><td>'+a.size+' bytes</td></tr>').join('')+'</table>';
  }
- const links=(e.links||[]).map(u=>'<div><a href="'+u+'" target="_blank" rel="noopener">'+esc(u)+'</a></div>').join('');
- document.getElementById('email').innerHTML='<table><tr><th>From</th><td>'+esc(e.from)+'</td></tr><tr><th>Subject</th><td>'+esc(e.subject)+'</td></tr><tr><th>Date</th><td>'+e.date+'</td></tr></table>'+at+'<h3>Links</h3>'+(links||'<span class="meta">none</span>')+'<h3>Body</h3><pre>'+esc(e.text||'')+'</pre>';
+ const links=(e.bestLinks||e.links||[]).map(u=>'<div><a href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(u)+'</a></div>').join('');
+ document.getElementById('email').innerHTML='<table><tr><th>From</th><td>'+esc(e.from)+'</td></tr><tr><th>Subject</th><td>'+esc(e.subject)+'</td></tr><tr><th>Date</th><td>'+esc(e.date)+'</td></tr><tr><th>Codes</th><td>'+esc((e.codes||[]).join(', ')||'none')+'</td></tr></table>'+at+'<h3>Links</h3>'+(links||'<span class="meta">none</span>')+'<h3>Body</h3><pre>'+esc(e.text||'')+'</pre>';
  window.scrollTo(0,document.body.scrollHeight);
 }
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -960,6 +1198,11 @@ module.exports = {
   extractLinks,
   extractAttachments,
   findVerifyLink,
+  findCode,
+  extractCodes,
+  rankLinks,
+  scoreLink,
+  decodeEntities,
   validAddressParam,
   backoffMs,
   sweepExpiredAddresses,

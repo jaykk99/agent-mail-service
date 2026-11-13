@@ -14,6 +14,9 @@ const {
   findVerifyLink,
   validAddressParam,
   backoffMs,
+  extractCodes,
+  rankLinks,
+  decodeEntities,
 } = require('../server.js');
 
 let failures = 0;
@@ -95,6 +98,48 @@ test('findVerifyLink respects from filter (newest first)', () => {
 test('findVerifyLink returns null when no links', () => {
   assert.equal(findVerifyLink([{ id: 'e', from: 'x', links: [] }], ''), null);
   assert.equal(findVerifyLink([], ''), null);
+});
+
+test('extractLinks mines href values and decodes entities', () => {
+  const links = extractLinks('See https://a.io/plain', '<a href="https://a.io/v?x=1&amp;y=2">Verify</a> <a href=\'mailto:x@y.z\'>mail</a>');
+  assert.deepEqual(links, ['https://a.io/v?x=1&y=2', 'https://a.io/plain']);
+});
+
+test('rankLinks puts the action link first and junk last', () => {
+  const ranked = rankLinks([
+    'https://cdn.x.com/logo.png',
+    'https://x.com/',
+    'https://twitter.com/x',
+    'https://x.com/unsubscribe?id=1',
+    'https://x.com/account/verify-email/9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c',
+  ]);
+  assert.equal(ranked[0], 'https://x.com/account/verify-email/9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c');
+  assert.ok(ranked.indexOf('https://x.com/') < ranked.indexOf('https://cdn.x.com/logo.png'));
+});
+
+test('findVerifyLink skips an email whose only links are junk', () => {
+  const emails = [
+    { id: 'promo', from: 'a@b.c', links: ['https://b.c/logo.png', 'https://b.c/unsubscribe'] },
+    { id: 'real', from: 'a@b.c', links: ['https://b.c/confirm?t=1'] },
+  ];
+  assert.equal(findVerifyLink(emails, '').emailId, 'real');
+});
+
+test('extractCodes: plain, spaced, next-line, alphanumeric', () => {
+  assert.deepEqual(extractCodes('Your code', 'Your verification code is 483921.'), ['483921']);
+  assert.deepEqual(extractCodes('', 'Use code 123 456 to sign in'), ['123456']);
+  assert.deepEqual(extractCodes('Verify your email', 'Enter this code:\n\n774 019\n\nIt expires in 10 minutes.'), ['774019']);
+  assert.deepEqual(extractCodes('', 'Your one-time passcode: K7Q2M9'), ['K7Q2M9']);
+  assert.deepEqual(extractCodes('482913 is your Acme code', ''), ['482913']);
+});
+
+test('extractCodes ignores phones, years, prices and URLs', () => {
+  assert.deepEqual(extractCodes('Welcome', 'Call 204-972-0325 or +1 204 972 0325. Copyright 2026. Total $1299.00. https://x.com/o/12345678'), []);
+  assert.deepEqual(extractCodes('', 'Verification code 5501. Sent in 2026 to 204-972-0325.'), ['5501']);
+});
+
+test('decodeEntities handles numeric and named entities', () => {
+  assert.equal(decodeEntities('a&amp;b &#39;x&#x27; &lt;y&gt; &quot;z&quot;'), 'a&b \'x\' <y> "z"');
 });
 
 test('validAddressParam accepts normal addresses', () => {

@@ -267,6 +267,79 @@ async function waitForHealth(child, timeoutMs = 15000) {
       assert.equal(vl.url, 'https://example.com/confirm?c=731204');
     });
 
+    const inbound = (payload) => fetch(`${BASE}/api/inbound`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${INBOUND_SECRET}` },
+      body: JSON.stringify(payload),
+    }).then(r => r.json());
+
+    await test('code endpoint returns the one-time code; list items carry codes + preview', async () => {
+      const to = `httpin@${DOMAIN}`;
+      const c = await (await fetch(`${BASE}/api/code/${encodeURIComponent(to)}`, { headers })).json();
+      assert.equal(c.ok, true);
+      assert.equal(c.code, '731204');
+      const list = await (await fetch(`${BASE}/api/inbox/${encodeURIComponent(to)}`, { headers })).json();
+      assert.deepEqual(list.emails[0].codes, ['731204']);
+      assert.ok(list.emails[0].preview.includes('Your code is'));
+    });
+
+    await test('HTML-only mail: link found in href with &amp; decoded, logo and unsubscribe never chosen', async () => {
+      const to = `htmlonly@${DOMAIN}`;
+      const j = await inbound({
+        to, from: 'no-reply@app.example.com', subject: 'Confirm your email',
+        html: '<html><head><style>a{color:red}</style></head><body><img src="https://cdn.example.com/logo.png">' +
+          '<a href="https://cdn.example.com/logo.png">logo</a>' +
+          '<p>Hi,</p><p>Tap the button to finish.</p>' +
+          '<a href="https://app.example.com/auth/confirm?token=abc123&amp;next=%2Fhome">Confirm email</a>' +
+          '<p><a href="https://app.example.com/unsubscribe?u=1">Unsubscribe</a></p></body></html>',
+      });
+      assert.equal(j.stored, true);
+      const vl = await (await fetch(`${BASE}/api/verify-link/${encodeURIComponent(to)}`, { headers })).json();
+      assert.equal(vl.url, 'https://app.example.com/auth/confirm?token=abc123&next=%2Fhome');
+      const full = await (await fetch(`${BASE}/api/inbox/${encodeURIComponent(to)}/${j.id}`, { headers })).json();
+      assert.equal(full.email.bestLinks[0], 'https://app.example.com/auth/confirm?token=abc123&next=%2Fhome');
+      assert.ok(!full.email.text.includes('color:red'));
+    });
+
+    await test('a retried delivery with the same Message-ID is stored once', async () => {
+      const to = `dedupe@${DOMAIN}`;
+      const payload = { to, from: 'a@b.example.com', subject: 'Code 554433', text: 'Your code is 554433', messageId: '<m1@b.example.com>' };
+      const first = await inbound(payload);
+      const second = await inbound(payload);
+      assert.equal(first.stored, true);
+      assert.equal(second.duplicate, true);
+      assert.equal(second.id, first.id);
+      const list = await (await fetch(`${BASE}/api/inbox/${encodeURIComponent(to)}`, { headers })).json();
+      assert.equal(list.total, 1);
+    });
+
+    await test('since ignores older mail; /api/wait wakes as soon as new mail lands', async () => {
+      const to = `waiter@${DOMAIN}`;
+      await inbound({ to, from: 'old@x.example.com', subject: 'Old code 111222', text: 'code 111222' });
+      await new Promise(r => setTimeout(r, 20));
+      const since = new Date().toISOString();
+      const stale = await (await fetch(`${BASE}/api/code/${encodeURIComponent(to)}?since=${encodeURIComponent(since)}`, { headers })).json();
+      assert.equal(stale.ok, false);
+      const t0 = Date.now();
+      const pending = fetch(`${BASE}/api/wait/${encodeURIComponent(to)}?timeoutMs=20000&since=${encodeURIComponent(since)}`, { headers }).then(r => r.json());
+      await new Promise(r => setTimeout(r, 300));
+      await inbound({ to, from: 'new@x.example.com', subject: 'Sign in', text: 'Your sign-in code:\n\n908 172\n\nOr open https://x.example.com/magic-link?t=zzz' });
+      const got = await pending;
+      assert.equal(got.ok, true);
+      assert.equal(got.code, '908172');
+      assert.equal(got.link, 'https://x.example.com/magic-link?t=zzz');
+      assert.equal(got.email.subject, 'Sign in');
+      assert.ok(Date.now() - t0 < 1500, `woke in ${Date.now() - t0}ms (should not wait for the 2s poll)`);
+    });
+
+    await test('code wait times out cleanly; bad since is a 400', async () => {
+      const to = `nothing@${DOMAIN}`;
+      const j = await (await fetch(`${BASE}/api/code/${encodeURIComponent(to)}/wait?timeoutMs=1000`, { headers })).json();
+      assert.equal(j.ok, false);
+      const bad = await fetch(`${BASE}/api/code/${encodeURIComponent(to)}/wait?since=yesterday`, { headers });
+      assert.equal(bad.status, 400);
+    });
+
     await test('HTTP inbound drops mail for other domains without error', async () => {
       const r = await fetch(`${BASE}/api/inbound`, {
         method: 'POST',

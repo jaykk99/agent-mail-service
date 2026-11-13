@@ -51,16 +51,42 @@ validated (`local@domain` shape, max 254 chars); malformed ones get a 400.
 | Method | Endpoint | Purpose |
 |---|---|---|
 | GET | `/health` | `{ ok, domain, storage, addresses, relay, webhook, addressTtlHours, retentionDays, deadLetters, retryQueue }` (no auth) |
-| POST | `/api/inbound` | Worker delivery only: `{ to, from, subject, text, html }` -> `{ ok, stored, id? }` (Bearer inbound secret) |
+| POST | `/api/inbound` | Worker delivery only: `{ to, from, subject, text, html, messageId?, date? }` -> `{ ok, stored, id?, duplicate? }` (Bearer inbound secret) |
 | POST | `/api/addresses` | `{ prefix }` -> `{ address }` (rate limited, prefix max 64 chars) |
 | GET | `/api/addresses` | known addresses with inbox counts + created/last-seen |
 | GET | `/api/inbox/:address` | paginated, searchable email list (see below) |
 | GET | `/api/inbox/:address/:id` | full email (subject, body, links, attachment metadata) |
-| GET | `/api/verify-link/:address?from=` | newest verification link for the address (immediate) |
-| GET | `/api/verify-link/:address/wait?from=&timeoutMs=` | long-poll for a link (default 30s, max 120s) — no busy-polling |
+| GET | `/api/wait/:address?since=&from=&timeoutMs=` | **one call does it all**: waits for the next email and returns it in full with `code` (best one-time code), `link` (best action link), `email.codes`, `email.bestLinks` |
+| GET | `/api/code/:address?from=&since=` | newest one-time code (immediate): `{ code, codes, emailId, subject, from }` |
+| GET | `/api/code/:address/wait?from=&since=&timeoutMs=` | long-poll for a code |
+| GET | `/api/verify-link/:address?from=&since=` | best verification link of the newest email that has one (immediate) |
+| GET | `/api/verify-link/:address/wait?from=&since=&timeoutMs=` | long-poll for a link (default 30s, max 120s) — no busy-polling |
 | GET | `/api/dead-letters` | emails that exhausted store retries (last 50) |
 | DELETE | `/api/inbox/:address` | clear inbox |
 | GET | `/dashboard` | local browser UI for addresses + inboxes (no auth page; token stays in sessionStorage) |
+
+### Codes, links and waiting
+
+- **One-time codes** are pulled from the subject and body: `483921`,
+  `123 456`, `123-456`, a code alone on the line after "Your code is:", and
+  6-8 character codes like `K7Q2M9`. Phone numbers, years, prices and URLs
+  are ignored. Codes are worked out when mail is read, so older mail has
+  them too and no database change is needed.
+- **Links** come from `href` values in the HTML as well as the text (many
+  verification links exist only behind a "Verify email" button), with
+  `&amp;` decoded. `links` keeps arrival order; `bestLinks` ranks them so
+  the action link is first and logos, tracking pixels, social and
+  unsubscribe links are last. `verify-link` never returns one of those.
+- **`since=<ISO time>`** on `inbox`, `code`, `verify-link` and `wait` hides
+  mail stored before that moment. Record the time, trigger the email, then
+  wait with `since` so an older message is never mistaken for the new one.
+- **Waiting is instant**: long-polls wake the moment mail is stored instead
+  of on the next 2-second poll.
+- **Duplicates**: a delivery retried with the same `messageId` (HTTP
+  inbound) or `Message-ID` header (SMTP) is acknowledged and stored once.
+- **Addresses survive restarts**: with Supabase, `GET /api/addresses` and
+  `/health` are rebuilt from stored mail, so the list is not empty after a
+  free Render instance sleeps and wakes.
 
 ### Inbox pagination + search
 
@@ -74,8 +100,8 @@ they take precedence, otherwise `page`/`per_page` are used:
 Search params (combine with either pagination style): `q=` matches
 subject/sender/body substrings, `from=` matches the sender substring.
 
-List items are summaries only — `{ id, from, subject, date, attachments,
-attachmentCount }`, where the last two are the same attachment count
+List items are summaries only — `{ id, from, subject, date, receivedAt,
+codes, linkCount, preview, attachments, attachmentCount }`, where the last two are the same attachment count
 (number) kept under both names for compatibility. Full attachment metadata
 (filename, content type, size) is on the single-email endpoint; attachment
 *content* is never stored or exposed.
