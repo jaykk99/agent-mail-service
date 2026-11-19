@@ -21,3 +21,13 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_KEY
         sync: false
+      - key: SMTP_RELAY_HOST
+        sync: false # outbound relay for POST /api/send; unset = sends answer 503
+      - key: SMTP_RELAY_PORT
+        value: "587"
+      - key: SMTP_RELAY_USER
+        sync: false
+      - key: SMTP_RELAY_PASS
+        sync: false
+      - key: SEND_MAX_PER_HOUR
+        value: "100"

@@ -54,6 +54,7 @@ validated (`local@domain` shape, max 254 chars); malformed ones get a 400.
 | POST | `/api/inbound` | Worker delivery only: `{ to, from, subject, text, html, messageId?, date? }` -> `{ ok, stored, id?, duplicate? }` (Bearer inbound secret) |
 | POST | `/api/addresses` | `{ prefix }` -> `{ address }` (rate limited, prefix max 64 chars) |
 | GET | `/api/addresses` | known addresses with inbox counts + created/last-seen |
+| POST | `/api/send` | `{ from, to, subject, text, html? }` -> `{ messageId }` (From must be an address this service created; sent via the SMTP relay) |
 | GET | `/api/inbox/:address` | paginated, searchable email list (see below) |
 | GET | `/api/inbox/:address/:id` | full email (subject, body, links, attachment metadata) |
 | GET | `/api/wait/:address?since=&from=&timeoutMs=` | **one call does it all**: waits for the next email and returns it in full with `code` (best one-time code), `link` (best action link), `email.codes`, `email.bestLinks` |
@@ -139,10 +140,15 @@ codes, linkCount, preview, attachments, attachmentCount }`, where the last two a
   Delivery is fire-and-forget with a configurable timeout
   (`INCOMING_WEBHOOK_TIMEOUT_MS`); failures are logged, never retried, and
   never block SMTP acceptance.
-- **SMTP relay config** (`SMTP_RELAY_HOST/PORT/USER/PASS`) is validated at
-  boot and reported in `/health` as `unconfigured`, `configured`, or
-  `misconfigured` (misconfig prints loud warnings). The service never sends
-  mail today; validation exists so a future relay or typo fails loudly.
+- **Outbound send** (`POST /api/send`, `{ from, to, subject, text, html? }`):
+  an agent sends mail from its own address through the SMTP relay
+  (`SMTP_RELAY_HOST/PORT/USER/PASS`). The `from` address must have been
+  created by this service — foreign From values get 403, so the service
+  can never send mail as someone else. Sends are rate-limited per From
+  address (`SEND_MAX_PER_HOUR`, default 100). Relay unconfigured -> 503,
+  relay failure -> 502. Relay config is validated at boot and reported in
+  `/health` as `unconfigured`, `configured`, or `misconfigured`
+  (misconfig prints loud warnings).
 
 ## Environment
 
@@ -161,7 +167,8 @@ codes, linkCount, preview, attachments, attachmentCount }`, where the last two a
 | `EMAILS_PER_ADDRESS_PER_HOUR` | no | default 100 |
 | `INCOMING_WEBHOOK_URL` / `INCOMING_WEBHOOK_SECRET` | no | signed incoming-mail webhook |
 | `INCOMING_WEBHOOK_TIMEOUT_MS` | no | webhook delivery timeout, default 8000 |
-| `SMTP_RELAY_HOST` / `SMTP_RELAY_PORT` / `SMTP_RELAY_USER` / `SMTP_RELAY_PASS` | no | validated at boot, no mail sent |
+| `SMTP_RELAY_HOST` / `SMTP_RELAY_PORT` / `SMTP_RELAY_USER` / `SMTP_RELAY_PASS` | no | outbound relay for POST /api/send (unset = sends answer 503) |
+| `SEND_MAX_PER_HOUR` | no | outbound sends per From address per rolling hour (default 100) |
 
 ## Free self-hosted deployment (no Cloudflare, nothing paid)
 

@@ -17,6 +17,10 @@ const {
   extractCodes,
   rankLinks,
   decodeEntities,
+  validateSendBody,
+  sendAgentMail,
+  setSendTransport,
+  registerAddress,
 } = require('../server.js');
 
 let failures = 0;
@@ -172,4 +176,127 @@ if (failures > 0) {
   console.error(`${failures} test(s) failed`);
   process.exit(1);
 }
-console.log('All unit tests passed');
+
+// --- Outbound send (mock transport, no real mail) ---
+async function atest(name, fn) {
+  try {
+    await fn();
+    console.log(`ok - ${name}`);
+  } catch (err) {
+    failures++;
+    console.error(`FAIL - ${name}\n  ${err.message}`);
+  }
+}
+
+(async () => {
+  await atest('validateSendBody accepts a valid body', () => {
+    const v = validateSendBody({
+      from: 'Agent1@Mail.Example.Test',
+      to: 'User@Example.com',
+      subject: 'Hi',
+      text: 'hello',
+    });
+    assert.equal(v.ok, true);
+    assert.equal(v.value.from, 'agent1@mail.example.test');
+    assert.deepEqual(v.value.to, ['user@example.com']);
+    assert.equal(v.value.subject, 'Hi');
+    assert.equal(v.value.html, undefined);
+  });
+
+  await atest('validateSendBody accepts array recipients and html body', () => {
+    const v = validateSendBody({
+      from: 'a@mail.example.test',
+      to: ['b@example.com', 'c@example.com'],
+      subject: '',
+      html: '<p>hi</p>',
+    });
+    assert.equal(v.ok, true);
+    assert.deepEqual(v.value.to, ['b@example.com', 'c@example.com']);
+  });
+
+  await atest('validateSendBody rejects bad input', () => {
+    assert.equal(validateSendBody(null).ok, false);
+    assert.equal(validateSendBody({ to: 'x@y.com', text: 'hi' }).ok, false); // no from
+    assert.equal(validateSendBody({ from: 'not-an-address', to: 'x@y.com', text: 'hi' }).ok, false);
+    assert.equal(validateSendBody({ from: 'a@mail.example.test', text: 'hi' }).ok, false); // no to
+    assert.equal(validateSendBody({ from: 'a@mail.example.test', to: 'bad', text: 'hi' }).ok, false);
+    assert.equal(validateSendBody({ from: 'a@mail.example.test', to: 'x@y.com' }).ok, false); // no body
+    assert.equal(validateSendBody({ from: 'a@mail.example.test', to: Array(11).fill('x@y.com'), text: 'hi' }).ok, false); // >10 recipients
+    assert.equal(validateSendBody({ from: 'a@mail.example.test', to: 'x@y.com', subject: 's'.repeat(1001), text: 'hi' }).ok, false);
+  });
+
+  await atest('sendAgentMail sends via injected mock transport', async () => {
+    const captured = [];
+    setSendTransport({
+      sendMail: async opts => {
+        captured.push(opts);
+        return { messageId: 'mock-id-1', accepted: opts.to, rejected: [] };
+      },
+    });
+    try {
+      registerAddress('sender@mail.example.test');
+      const out = await sendAgentMail({
+        from: 'sender@mail.example.test',
+        to: ['dest@example.com'],
+        subject: 'Hello',
+        text: 'body here',
+        html: undefined,
+      });
+      assert.equal(out.messageId, 'mock-id-1');
+      assert.equal(captured.length, 1);
+      assert.equal(captured[0].from, 'sender@mail.example.test');
+      assert.deepEqual(captured[0].to, ['dest@example.com']);
+      assert.equal(captured[0].subject, 'Hello');
+    } finally {
+      setSendTransport(null);
+    }
+  });
+
+  await atest('sendAgentMail rejects a foreign From address (403)', async () => {
+    setSendTransport({ sendMail: async () => { throw new Error('must not be called'); } });
+    try {
+      await assert.rejects(
+        sendAgentMail({ from: 'stranger@evil.example', to: ['x@y.com'], subject: 's', text: 't' }),
+        err => err.status === 403
+      );
+    } finally {
+      setSendTransport(null);
+    }
+  });
+
+  await atest('sendAgentMail answers 503 when no relay is configured', async () => {
+    // This process has no SMTP_RELAY_HOST, so the relay is unconfigured
+    // and no mock transport is injected here.
+    setSendTransport(null);
+    registerAddress('norelay@mail.example.test');
+    await assert.rejects(
+      sendAgentMail({ from: 'norelay@mail.example.test', to: ['x@y.com'], subject: 's', text: 't' }),
+      err => err.status === 503
+    );
+  });
+
+  await atest('sendAgentMail enforces the per-address hourly quota (429)', async () => {
+    setSendTransport({
+      sendMail: async opts => ({ messageId: 'mock-id', accepted: opts.to, rejected: [] }),
+    });
+    try {
+      const from = 'quota@mail.example.test';
+      registerAddress(from);
+      for (let i = 0; i < 100; i++) {
+        await sendAgentMail({ from, to: ['x@y.com'], subject: 's', text: 't' });
+      }
+      await assert.rejects(
+        sendAgentMail({ from, to: ['x@y.com'], subject: 's', text: 't' }),
+        err => err.status === 429
+      );
+    } finally {
+      setSendTransport(null);
+    }
+  });
+
+  if (failures > 0) {
+    console.error(`${failures} test(s) failed`);
+    process.exit(1);
+  }
+  console.log('All unit tests passed');
+})();

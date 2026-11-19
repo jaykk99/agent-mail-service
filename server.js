@@ -8,6 +8,7 @@
  * Endpoints:
  *   POST /api/addresses          { prefix } -> { address }
  *   GET  /api/addresses          -> known addresses with inbox counts
+ *   POST /api/send               { from, to, subject, text, html? } -> { messageId }
  *   GET  /api/inbox/:address     -> paginated list (page/per_page AND limit/offset, q, from)
  *   GET  /api/inbox/:address/:id -> full email (subject, body, links, attachment metadata)
  *   DELETE /api/inbox/:address   -> clear inbox
@@ -21,7 +22,9 @@
  * (RATE_LIMIT_PER_MINUTE) plus hourly quotas (ADDRESS_CREATE_MAX_PER_HOUR,
  * EMAILS_PER_ADDRESS_PER_HOUR), HMAC-signed incoming-mail webhooks,
  * structured request logging, attachment metadata (never content),
- * outbound SMTP relay config validation.
+ * outbound SMTP relay send (POST /api/send) via SMTP_RELAY_HOST/PORT/USER/PASS.
+ * Outbound mail is only ever sent FROM an address this service created;
+ * foreign From values are rejected.
  *
  * Rate-limit precedence: BOTH creation limits apply — a creation must pass
  * the per-IP per-minute limit AND the global hourly quota; either one can
@@ -85,11 +88,14 @@ const EMAILS_PER_ADDRESS_PER_HOUR = numEnv('EMAILS_PER_ADDRESS_PER_HOUR', 100);
 const WEBHOOK_URL = process.env.INCOMING_WEBHOOK_URL || '';
 const WEBHOOK_SECRET = process.env.INCOMING_WEBHOOK_SECRET || '';
 const WEBHOOK_TIMEOUT_MS = numEnv('INCOMING_WEBHOOK_TIMEOUT_MS', 8000);
-// Optional outbound SMTP relay config (validated at boot; no mail is ever
-// sent by this service today — validation exists so a future relay or
-// misconfig surfaces loudly instead of silently).
+// Optional outbound SMTP relay: mail sent by POST /api/send goes through
+// here. Validated at boot; when unconfigured, /api/send answers 503.
 const SMTP_RELAY_HOST = process.env.SMTP_RELAY_HOST || '';
 const SMTP_RELAY_PORT = numEnv('SMTP_RELAY_PORT', 587);
+const SMTP_RELAY_USER = process.env.SMTP_RELAY_USER || '';
+const SMTP_RELAY_PASS = process.env.SMTP_RELAY_PASS || '';
+// Hourly outbound-send quota per From address (0 disables).
+const SEND_MAX_PER_HOUR = numEnv('SEND_MAX_PER_HOUR', 100);
 
 function validateRelayConfig() {
   if (!SMTP_RELAY_HOST) return { status: 'unconfigured', problems: [] };
@@ -113,6 +119,114 @@ function validateRelayConfig() {
   return { status: 'configured', problems: [] };
 }
 const RELAY_STATUS = validateRelayConfig();
+
+// --- Outbound send path (POST /api/send) ---
+// The nodemailer transport is created lazily from the relay env and cached;
+// setSendTransport() swaps it for a stub in tests.
+let sendTransport = null;
+
+function getSendTransport() {
+  if (sendTransport) return sendTransport;
+  if (RELAY_STATUS.status !== 'configured') return null;
+  const nodemailer = require('nodemailer');
+  sendTransport = nodemailer.createTransport({
+    host: SMTP_RELAY_HOST,
+    port: SMTP_RELAY_PORT,
+    secure: SMTP_RELAY_PORT === 465,
+    auth: SMTP_RELAY_USER ? { user: SMTP_RELAY_USER, pass: SMTP_RELAY_PASS } : undefined,
+  });
+  return sendTransport;
+}
+
+// Test hook: replace the live relay transport with a stub (or null to
+// restore lazy creation from env).
+function setSendTransport(t) { sendTransport = t || null; }
+
+const MAX_SEND_RECIPIENTS = 10;
+const MAX_SEND_BODY_CHARS = 100000;
+const MAX_SEND_SUBJECT_CHARS = 1000;
+
+// Validate + normalize a POST /api/send body.
+// Returns { ok: true, value: { from, to, subject, text, html } }
+// or { ok: false, error }.
+function validateSendBody(body) {
+  if (!body || typeof body !== 'object') {
+    return { ok: false, error: 'Request body must be a JSON object' };
+  }
+  const from = typeof body.from === 'string' ? body.from.trim().toLowerCase() : '';
+  if (!validAddressParam(from)) {
+    return { ok: false, error: 'from must be a valid email address' };
+  }
+  let to = body.to;
+  if (typeof to === 'string') to = [to];
+  if (!Array.isArray(to) || to.length === 0) {
+    return { ok: false, error: 'to is required (address or array of addresses)' };
+  }
+  if (to.length > MAX_SEND_RECIPIENTS) {
+    return { ok: false, error: `at most ${MAX_SEND_RECIPIENTS} recipients per send` };
+  }
+  const recipients = [];
+  for (const r of to) {
+    const addr = typeof r === 'string' ? r.trim().toLowerCase() : '';
+    if (!validAddressParam(addr)) {
+      return { ok: false, error: `to contains an invalid address: ${String(r).slice(0, 80)}` };
+    }
+    recipients.push(addr);
+  }
+  const subject = body.subject === undefined || body.subject === null ? '' : String(body.subject);
+  if (subject.length > MAX_SEND_SUBJECT_CHARS) {
+    return { ok: false, error: 'subject is too long' };
+  }
+  const text = body.text === undefined || body.text === null ? '' : String(body.text);
+  const html = body.html === undefined || body.html === null ? '' : String(body.html);
+  if (!text && !html) {
+    return { ok: false, error: 'text or html body is required' };
+  }
+  if (text.length > MAX_SEND_BODY_CHARS || html.length > MAX_SEND_BODY_CHARS) {
+    return { ok: false, error: 'message body is too long' };
+  }
+  return { ok: true, value: { from, to: recipients, subject, text, html: html || undefined } };
+}
+
+// Core outbound send. Throws an Error with .status for HTTP mapping.
+// The From address must be one this service created (in the address
+// registry); foreign From values are rejected so the service can never
+// be used to send mail as someone else.
+async function sendAgentMail({ from, to, subject, text, html }) {
+  if (!addressRegistry.has(from)) {
+    const err = new Error('from address was not created by this service');
+    err.status = 403;
+    throw err;
+  }
+  if (rateLimitExceeded(`send:${from}`, SEND_MAX_PER_HOUR)) {
+    const err = new Error('Send rate limit exceeded for this address');
+    err.status = 429;
+    throw err;
+  }
+  const transport = getSendTransport();
+  if (!transport) {
+    const err = new Error(`Outbound relay is not configured (status: ${RELAY_STATUS.status})`);
+    err.status = 503;
+    throw err;
+  }
+  try {
+    const info = await transport.sendMail({ from, to, subject, text, html });
+    console.log(JSON.stringify({
+      level: 'info', type: 'smtp-send',
+      from, to, messageId: info.messageId || null,
+    }));
+    return {
+      messageId: info.messageId || null,
+      accepted: info.accepted || [],
+      rejected: info.rejected || [],
+    };
+  } catch (err) {
+    console.error(`[smtp-send] relay failed for ${from}: ${err.message}`);
+    const wrapped = new Error(`Relay send failed: ${err.message}`);
+    wrapped.status = 502;
+    throw wrapped;
+  }
+}
 
 // --- Storage backend: Supabase if configured, else in-memory ---
 let supabase = null;
@@ -926,6 +1040,22 @@ app.get('/api/addresses', auth, async (req, res) => {
   }
 });
 
+// Send mail FROM one of this service's own addresses, via the outbound
+// SMTP relay. Auth: same Bearer token as the other routes. The From
+// address must have been created by this service; foreign From values get
+// 403. Relay unconfigured -> 503. Relay failure -> 502.
+app.post('/api/send', auth, async (req, res) => {
+  try {
+    const v = validateSendBody(req.body || {});
+    if (!v.ok) return res.status(400).json({ ok: false, error: v.error });
+    const result = await sendAgentMail(v.value);
+    res.json({ ok: true, from: v.value.from, to: v.value.to, ...result });
+  } catch (err) {
+    if (err.status === 429) res.setHeader('Retry-After', '3600');
+    res.status(err.status || 500).json({ ok: false, error: err.message });
+  }
+});
+
 // List emails for an address, with pagination + search.
 // Pagination: page/per_page (1-based) OR limit/offset (limit/offset win if
 // present). Search: q (subject/from/body), from (sender substring).
@@ -1206,4 +1336,9 @@ module.exports = {
   validAddressParam,
   backoffMs,
   sweepExpiredAddresses,
+  validateSendBody,
+  sendAgentMail,
+  getSendTransport,
+  setSendTransport,
+  registerAddress,
 };

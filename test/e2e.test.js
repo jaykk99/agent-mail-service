@@ -68,6 +68,49 @@ async function test(name, fn) {
   }
 }
 
+// Fake outbound SMTP relay: speaks just enough SMTP for nodemailer
+// (EHLO, MAIL FROM, RCPT TO, DATA, QUIT; no STARTTLS, no AUTH) and records
+// every message the server under test sends through it. Nothing leaves
+// the box.
+const RELAY_PORT = 2532;
+const relayMail = [];
+const relayServer = net.createServer(sock => {
+  sock.write('220 127.0.0.1 fake-relay\r\n');
+  let buf = '';
+  let dataMode = false;
+  let data = '';
+  let mailFrom = '';
+  let rcpts = [];
+  sock.on('data', chunk => {
+    buf += chunk.toString('utf8');
+    let idx;
+    while ((idx = buf.indexOf('\r\n')) !== -1) {
+      const line = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      if (dataMode) {
+        if (line === '.') {
+          dataMode = false;
+          relayMail.push({ from: mailFrom, to: rcpts.slice(), data });
+          sock.write('250 OK: queued\r\n');
+        } else {
+          data += line + '\n';
+        }
+        continue;
+      }
+      const space = line.indexOf(' ');
+      const cmd = (space === -1 ? line : line.slice(0, space)).toUpperCase();
+      const arg = space === -1 ? '' : line.slice(space + 1);
+      if (cmd === 'EHLO' || cmd === 'HELO') sock.write('250-fake-relay\r\n250 8BITMIME\r\n');
+      else if (cmd === 'MAIL') { mailFrom = (arg.match(/<([^>]*)>/) || [])[1] || arg; sock.write('250 OK\r\n'); }
+      else if (cmd === 'RCPT') { rcpts.push((arg.match(/<([^>]*)>/) || [])[1] || arg); sock.write('250 OK\r\n'); }
+      else if (cmd === 'DATA') { dataMode = true; data = ''; sock.write('354 End data with <CR><LF>.<CR><LF>\r\n'); }
+      else if (cmd === 'RSET') { mailFrom = ''; rcpts = []; sock.write('250 OK\r\n'); }
+      else if (cmd === 'QUIT') { sock.write('221 Bye\r\n'); sock.end(); }
+      else sock.write('250 OK\r\n');
+    }
+  });
+});
+
 const headers = { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' };
 
 function smtpSend({ to, from, subject, body, raw }) {
@@ -114,6 +157,7 @@ async function waitForHealth(child, timeoutMs = 15000) {
 
 (async () => {
   await new Promise(r => whServer.listen(WH_PORT, '127.0.0.1', r));
+  await new Promise(r => relayServer.listen(RELAY_PORT, '127.0.0.1', r));
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
     env: {
       ...process.env, PORT: String(PORT), SMTP_PORT: String(SMTP_PORT),
@@ -121,6 +165,8 @@ async function waitForHealth(child, timeoutMs = 15000) {
       AGENT_MAIL_INBOUND_SECRET: INBOUND_SECRET,
       INCOMING_WEBHOOK_URL: `http://127.0.0.1:${WH_PORT}/hook`,
       INCOMING_WEBHOOK_SECRET: WH_SECRET,
+      SMTP_RELAY_HOST: '127.0.0.1',
+      SMTP_RELAY_PORT: String(RELAY_PORT),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -169,6 +215,59 @@ async function waitForHealth(child, timeoutMs = 15000) {
       assert.equal(r.status, 200);
       assert.ok(j.address.startsWith('agent'), `got ${j.address}`);
       assert.ok(!j.address.startsWith('@'), `address has empty local part: ${j.address}`);
+    });
+
+    // --- Outbound send via the fake relay ---
+    await test('POST /api/send delivers through the relay from a created address', async () => {
+      relayMail.length = 0;
+      const r = await fetch(`${BASE}/api/send`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ from: address, to: 'dest@example.com', subject: 'Hello from the agent', text: 'sent body here', html: '<p>sent body here</p>' }),
+      });
+      const j = await r.json();
+      assert.equal(r.status, 200, JSON.stringify(j));
+      assert.equal(j.ok, true);
+      assert.ok(j.messageId, 'response carries a messageId');
+      assert.equal(j.from, address);
+      assert.deepEqual(j.to, ['dest@example.com']);
+      // nodemailer acks only after the relay accepts DATA, so it is
+      // already captured; poll briefly just in case.
+      for (let i = 0; i < 10 && relayMail.length === 0; i++) await new Promise(r2 => setTimeout(r2, 100));
+      assert.equal(relayMail.length, 1, 'relay received exactly one message');
+      assert.equal(relayMail[0].from, address);
+      assert.deepEqual(relayMail[0].to, ['dest@example.com']);
+      assert.ok(relayMail[0].data.includes('Subject: Hello from the agent'), 'relay DATA carries the subject');
+      assert.ok(relayMail[0].data.includes('sent body here'), 'relay DATA carries the body');
+    });
+
+    await test('POST /api/send rejects a foreign From address', async () => {
+      const r = await fetch(`${BASE}/api/send`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ from: 'someone-else@example.com', to: 'dest@example.com', subject: 'x', text: 'y' }),
+      });
+      assert.equal(r.status, 403);
+      assert.equal((await r.json()).ok, false);
+    });
+
+    await test('POST /api/send rejects malformed bodies', async () => {
+      const bad = [
+        { to: 'dest@example.com', text: 'no from' },
+        { from: address, text: 'no to' },
+        { from: address, to: 'dest@example.com' }, // no body
+        { from: address, to: 'not-an-address', text: 'x' },
+      ];
+      for (const body of bad) {
+        const r = await fetch(`${BASE}/api/send`, { method: 'POST', headers, body: JSON.stringify(body) });
+        assert.equal(r.status, 400, JSON.stringify(body));
+      }
+    });
+
+    await test('POST /api/send rejects unauthenticated requests', async () => {
+      const r = await fetch(`${BASE}/api/send`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: address, to: 'dest@example.com', subject: 'x', text: 'y' }),
+      });
+      assert.equal(r.status, 401);
     });
 
     await test('verify-link returns nothing before any mail arrives', async () => {
@@ -690,6 +789,7 @@ async function waitForHealth(child, timeoutMs = 15000) {
   } finally {
     child.kill('SIGTERM');
     whServer.close();
+    relayServer.close();
     await new Promise(r => setTimeout(r, 500));
   }
 
