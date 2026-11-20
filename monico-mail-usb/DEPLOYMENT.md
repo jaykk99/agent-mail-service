@@ -18,7 +18,7 @@ publish the delegation and any necessary glue records. There is no purely
 local/no-third-party mechanism to allocate an arbitrary publicly recognized
 internet name.
 
-Your Linux host needs a public routable IP (or working public port forwards),
+Your Linux host needs a globally routable public IPv4 **or IPv6** address (or working public port forwards),
 incoming TCP **25** from unrelated internet mail servers, outgoing TCP **25**
 to those mail servers, reverse DNS/PTR from the public IP owner, and 24/7
 uptime. Set up MX/A, SPF, DKIM and DMARC. Standard email clients also require
@@ -136,7 +136,7 @@ syntax, install the reviewed zone in BIND9 with bind-readable permissions,
 and arrange the domain delegation at the parent nameserver authority. If
 ns1/ns2 are on the same IP/machine, there is a single point of failure.
 
-The domain's published MX record must reference the real mail host; the
+The domain's published MX record must reference the real mail host through an A or AAAA record; the
 public sending IP needs the correct PTR (reverse DNS) set by the IP owner.
 You cannot create globally visible reverse DNS by editing your local BIND zone.
 
@@ -287,3 +287,29 @@ itself, create a public DNS delegation, or prevent Chromebook sleep.
 For native systemd only, after checking/securely installing the unit,
 run `sudo systemctl daemon-reload`, then start and inspect the logs. Do
 not enable the service until real TLS, DNS and mail transport tests pass.
+
+## Alternative public transport: IPv6-only Linux mail server
+
+You do not strictly need a public **IPv4** address. If your Linux host is assigned a globally routable IPv6 address and your firewall/ISP permits inbound **and outbound TCP 25**, you can run Postfix via IPv6. This still uses public internet infrastructure and a **real delegated domain**. IPv4-only external mail systems may not reach an IPv6-only MX directly.
+
+To stage the full Postfix/Dovecot + BIND9 system using IPv6, pass the public IPv6 addresses instead of IPv4. The nameserver addresses must also be reachable:
+
+```bash
+python3 selfhost/prepare_live.py \
+  --domain "$MONICO_DOMAIN" --data "$MONICO_DATA" \
+  --public-ipv6 "YOUR_PUBLIC_IPV6" \
+  --ns1-ipv6 "YOUR_NS1_PUBLIC_IPV6" \
+  --ns2-ipv6 "YOUR_NS2_PUBLIC_IPV6" \
+  --vmail-uid "$(id -u vmail)" --vmail-gid "$(id -g vmail)" \
+  --cert "/path/to/fullchain.pem" --key "/path/to/privkey.pem"
+```
+
+Use both `--public-ip` and `--public-ipv6` for a dual-stack mail host. Never substitute `fe80::`, `fd00::`, or another local/private IPv6 address. The configuration is only staged, not automatically installed or made public.
+
+After actual installation, test **from an independent Linux machine outside the home network**:
+
+```bash
+python3 selfhost/public_probe.py --domain "$MONICO_DOMAIN"
+```
+
+The script checks MX/NS DNS, public address records, inbound SMTP port 25, trusted STARTTLS port 587, IMAPS port 993, and optional MCP HTTPS port 443. It does not send a message or prove delivery to another provider. Send and receive real external messages before claiming public functionality.
