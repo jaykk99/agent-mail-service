@@ -1466,6 +1466,14 @@ app.get('/ready', async (_req, res) => {
   if (TOKEN === 'dev-token-change-me' || TOKEN.length < 32) {
     issues.push('operator_token_insecure_or_missing');
   }
+  // A web app responding to HTTPS does not make 'name@localhost' a
+  // deliverable public email address. Validate the configured mail identity.
+  const validMailDomain = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(DOMAIN)
+    && !/(?:\.(?:invalid|test|example|localhost))$/.test(DOMAIN)
+    && !['example.com', 'example.net', 'example.org'].includes(DOMAIN);
+  if (!validMailDomain) {
+    issues.push('public_mail_domain_not_configured');
+  }
   if (!useSupabase) {
     issues.push('persistent_storage_not_configured');
   } else {
