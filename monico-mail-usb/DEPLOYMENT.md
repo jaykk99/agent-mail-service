@@ -255,3 +255,35 @@ During account selection, the agent authenticates to MCP with its **invitation c
 After receiving its account, the agent reconnects with its **agent_token as the HTTP bearer**, not the master operator token, then uses its own tools with matching `agent_id` and `agent_token`. Tokens are checked against SQLite and rotation invalidates the old bearer. There is no third-party identity provider.
 
 This improves tool-level isolation but does **not** turn a private HTTP endpoint into a safely accessible public URL. Do not forward the MCP port publicly before terminating HTTPS and enabling abuse protections.
+
+
+## Step 8 — Native-Linux automatic restart (USB-aware)
+
+If you use a dedicated native Linux host with systemd, stage a non-root
+service unit (replace paths and account with real values):
+
+```bash
+python3 selfhost/systemd_mcp.py \
+  --user monico \
+  --project /opt/monico-mail-usb \
+  --data /mnt/usb/monico \
+  --env-file /etc/monico/monico.env
+
+# Check the staged unit before installing or enabling it:
+cat .generated/monico-mcp.service
+```
+
+The environment file (mode 0600; root-owned) must contain `MONICO_DATA`,
+`MONICO_DOMAIN`, `MONICO_ADMIN_KEY`, `MONICO_MCP_BEARER_TOKEN`, and,
+after your native Postfix/Dovecot are available, `MONICO_MAIL_HOST`.
+No secrets are written into the generated service file.
+
+Verify the non-root `monico` Linux account can read the repository and
+write the mounted USB database; verify Postfix and Dovecot separately. The
+staged unit checks that the data directory exists and is writable, starts
+the localhost MCP server, and restarts on failure. It does not install
+itself, create a public DNS delegation, or prevent Chromebook sleep.
+
+For native systemd only, after checking/securely installing the unit,
+run `sudo systemctl daemon-reload`, then start and inspect the logs. Do
+not enable the service until real TLS, DNS and mail transport tests pass.
