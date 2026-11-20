@@ -68,6 +68,31 @@ curl --cacert /path/to/monico-ca.crt \
   https://PUBLIC_IP:8766/api/me
 ~~~
 
+### Outside-network verification tool
+
+Once the public gateway is listening and your router/firewall is configured,
+run the following on an **independent Linux device on a different internet
+connection** (not inside the same LAN and not solely from the host itself):
+
+~~~bash
+# Copy ONLY the public monico-ca.crt certificate (never the private key)
+python3 phone/probe_public.py \
+  --url "https://YOUR_ACTUAL_PUBLIC_IPV4:8766" \
+  --ca-cert /secure/path/to/monico-ca.crt
+
+# Optional: verify authenticated agent access, prompting privately for token
+python3 phone/probe_public.py \
+  --url "https://YOUR_ACTUAL_PUBLIC_IPV4:8766" \
+  --ca-cert /secure/path/to/monico-ca.crt \
+  --verify-agent
+~~~
+
+The probe refuses ordinary HTTP, local/private IP addresses, untrusted
+certificates and redirects. It tests HTTPS reachability, the 1,000-agent
+health response, unauthorized API rejection, and optionally a valid agent
+login. It deliberately **does not** report public telephone/SMS service,
+internet email, or successful cross-router WebRTC voice.
+
 **Repeat from a different network, such as mobile data.** A localhost
 test is NOT proof of internet availability. Avoid exposing credentials in
 shell history, screenshots or logs.
