@@ -17,6 +17,21 @@ containing localhost only works on the same device; public accessibility
 and cross-NAT voice are not automatic. For more information see
 [WebPhone setup](phone/README.md).
 
+## Public agent network from Linux (without buying a domain)
+
+The 1,000-agent local messaging/phone application can now be exposed to
+remote Monico clients using either your own **public-IP HTTPS server** or
+an **optional public Tor .onion service** when you lack inbound public IP
+routing. Public IP HTTPS requires a route/port-forward and TLS trust.
+Tor requires Tor-capable clients and depends on the volunteer Tor network.
+Neither route creates normal carrier phone numbers, carrier SMS, or
+publicly deliverable email addresses.
+
+See [public Linux deployment choices](phone/PUBLIC_ACCESS.md).
+The local Linux server continues to work with no internet connection.
+
+---
+
 ## Zero-setup Linux mode: 1,000 internal phones, email and messaging
 
 The free **private agent network** runs entirely on Linux using Python 3's
