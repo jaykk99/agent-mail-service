@@ -29,9 +29,10 @@ jobs:
       - name: Verify on system Python (no pip installs)
         run: |
           python3 --version
-          python3 -m py_compile phone/provision.py phone/server.py phone/mcp.py phone/start.py phone/internal_mail.py phone/usb_storage.py phone/webphone.py phone/probe_public.py linux/manage.py linux/public_manage.py
+          python3 -m py_compile phone/provision.py phone/server.py phone/mcp.py phone/start.py phone/internal_mail.py phone/usb_storage.py phone/webphone.py phone/probe_public.py linux/manage.py linux/public_manage.py linux/free_domain.py
           sh -n start.sh
           bash -n linux/install.sh
+          bash -n linux/enable_autostart.sh
           python3 -m unittest discover -s test -p 'test_phone*.py' -v
           python3 -m unittest discover -s test -p 'test_linux*.py' -v
       - name: Parse browser JavaScript syntax (CI only)

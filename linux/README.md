@@ -107,6 +107,58 @@ databases. Make encrypted backups to another Linux filesystem, protecting
 the secrets and not logging them. Don't store the mailbox secrets in a
 public repository.
 
+## Start everything automatically in one command
+
+Run this once, as your normal Linux user, in the cloned repository:
+
+~~~bash
+bash linux/enable_autostart.sh
+~~~
+
+That single command does the whole installation: it detects or creates private
+storage, installs FastMCP into `monico-mail-usb/.venv` when missing, starts the
+dashboard (`http://127.0.0.1:8765`) and mail MCP
+(`http://127.0.0.1:8787/mcp`), then installs and enables a `systemd --user`
+watchdog unit that restarts both services when they stop and starts them with
+your session. It also enables lingering so the stack comes back after a reboot
+without you logging in. Nothing else is required.
+
+It is idempotent: re-run the same command after a reboot, an update or a crash
+and it reuses the same storage, identities and unit. Options are only for
+non-default choices:
+
+~~~bash
+bash linux/enable_autostart.sh --state-dir /your/usb/monico-state  # pin storage
+bash linux/enable_autostart.sh --domain your-delegated-domain.org  # first run
+bash linux/enable_autostart.sh --free-domain                       # claim a free name
+bash linux/enable_autostart.sh --interval 120                      # check every 2 min
+bash linux/enable_autostart.sh --status
+bash linux/enable_autostart.sh --uninstall
+bash linux/enable_autostart.sh --print                             # review the unit
+~~~
+
+On a first interactive run it asks for the mailbox domain: press Enter to claim
+a free DuckDNS subdomain, or type a domain you already control. The claim needs
+a free token from [duckdns.org](https://www.duckdns.org), read from
+`DUCKDNS_TOKEN` or prompted once and saved to
+`~/.config/monico/duckdns.token` with mode 0600. Only a name DuckDNS reports as
+not taken is kept. A free name resolves to your host, but it does not provide
+inbound TCP/25, reverse DNS or a delegated mail domain, so receiving internet
+email on it still needs the separate mail deployment in
+[monico-mail-usb/DEPLOYMENT.md](../monico-mail-usb/DEPLOYMENT.md).
+
+The installer refuses a relative path, a `monico/linux-config.json` readable
+by other users, and `--public-ip` without `--allow-public`. It never re-runs
+USB discovery for the unit: the pinned directory is used, so a detached drive
+fails loudly instead of creating a second identity store. Unit files contain
+paths and the optional public IP, never operator or agent secrets. Running it
+with `sudo` is corrected to your user automatically; a root shell with no user
+is refused.
+
+This supervises the **local** dashboard and MCP services only; public
+SMTP/IMAP, DNS, carrier calls/SMS and outside-network reachability remain
+separate, unverified work.
+
 ## Optional: Start your own public HTTPS browser gateway
 
 This exposes **only the Monico browser messenger, private extensions, and
