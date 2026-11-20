@@ -15,6 +15,9 @@ class SelfHostedConfigTests(unittest.TestCase):
             self.assertIn("mail_accounts", output["dovecot-2.4-extra.conf"])
             self.assertIn("virtual_transport = lmtp:unix:private/dovecot-lmtp",
                           output["postfix-main.cf"])
+            self.assertIn("proxy:sqlite:/etc/postfix/sqlite-sender-login.cf",
+                          output["postfix-main.cf"])
+            self.assertIn("proxy_read_maps =", output["postfix-main.cf"])
             self.assertIn("SELECT email FROM agents", output["postfix-sqlite-virtual-mailboxes.cf"])
             self.assertIn("mail_accounts", output["dovecot-sql.conf.ext"])
             self.assertIn("default_pass_scheme = SHA256.HEX", output["dovecot-sql.conf.ext"])
