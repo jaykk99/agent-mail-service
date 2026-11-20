@@ -121,6 +121,48 @@ connect = {db}
 default_pass_scheme = SHA256.HEX
 password_query = SELECT a.email AS user, m.password_hash AS password FROM agents a JOIN mail_accounts m ON m.email = a.email WHERE a.email = '%u'
 """
+
+    dovecot_24 = f"""# REVIEW ONLY: Dovecot 2.4, not compatible with Dovecot 2.3
+dovecot_config_version = 2.4.0
+dovecot_storage_version = 2.4.0
+protocols = imap lmtp
+mail_driver = maildir
+mail_path = ~/Maildir
+ssl = yes
+ssl_server_cert_file = {certificate}
+ssl_server_key_file = {private_key}
+auth_allow_cleartext = no
+auth_mechanisms = plain login
+sql_driver = sqlite
+sqlite_path = {db}
+passdb_default_password_scheme = SHA256.HEX
+
+passdb sql {{
+  query = SELECT a.email AS user, m.password_hash AS password FROM agents a JOIN mail_accounts m ON m.email = a.email WHERE a.email = '%{{user}}'
+}}
+userdb static {{
+  fields {{
+    uid = {uid}
+    gid = {gid}
+    home = {mail_root}/%{{user | domain}}/%{{user | username}}
+  }}
+}}
+service lmtp {{
+  unix_listener /var/spool/postfix/private/dovecot-lmtp {{
+    mode = 0600
+    user = postfix
+    group = postfix
+  }}
+}}
+service auth {{
+  unix_listener /var/spool/postfix/private/auth {{
+    mode = 0660
+    user = postfix
+    group = postfix
+  }}
+}}
+"""
+
     # DNS files deliberately have placeholders for verification of DKIM
     # rather than inventing a key and claiming deliverability.
     zone = f"""; Illustrative authoritative DNS records. A parent-zone delegation is REQUIRED.
@@ -139,6 +181,7 @@ _dmarc 3600 IN TXT "v=DMARC1; p=none"
         "postfix-sqlite-virtual-mailboxes.cf": postfix_sqlite,
         "postfix-sqlite-sender-login.cf": sender_sqlite,
         "dovecot-2.3-extra.conf": dovecot_conf,
+        "dovecot-2.4-extra.conf": dovecot_24,
         "dovecot-sql.conf.ext": dovecot_sql,
         "dns-zone-example.txt": zone,
     }
@@ -166,6 +209,7 @@ def main():
         file_path.chmod(0o600)
         print(file_path)
     print("CONFIG TEMPLATES GENERATED. Nothing has been installed or exposed publicly.")
+    print("Select ONE Dovecot config matching the installed version (2.3 or 2.4).")
     print("Do NOT deploy without TLS, DNS/MX/PTR, DKIM, security review and tested USB permissions.")
 
 
