@@ -78,9 +78,9 @@ def zone_text(domain, mail_ip, ns1_ip, ns2_ip, dkim_key=None, serial=None,
         ("mcp", mail_ip, mail_ipv6),
     ):
         if address4:
-            host_addresses.append(f"{name:<7}IN A  {address4}")
+            host_addresses.append(f"{name:<8}IN A  {address4}")
         if address6:
-            host_addresses.append(f"{name:<7}IN AAAA  {address6}")
+            host_addresses.append(f"{name:<8}IN AAAA  {address6}")
 
     lines = [
         "$TTL 3600",
