@@ -27,6 +27,21 @@ def public_ipv4(value):
     return str(addr)
 
 
+def read_opendkim_public_txt(path):
+    """Extract only the base64 DKIM public p= key from opendkim-genkey TXT output."""
+    content = Path(path).read_text(encoding="utf-8")
+    if "PRIVATE KEY" in content or len(content) > 20000:
+        raise ValueError("Use the OpenDKIM PUBLIC mail.txt file; never a private key")
+    quoted = re.findall(r'"([^"]*)"', content)
+    merged = "".join(quoted)
+    if not merged.startswith("v=DKIM1;"):
+        raise ValueError("Invalid OpenDKIM public TXT file")
+    match = re.search(r"(?:^|;)\\s*p=([A-Za-z0-9+/=]+)", merged)
+    if not match or not _DKIM_KEY.fullmatch(match.group(1)):
+        raise ValueError("Invalid OpenDKIM public DKIM key")
+    return match.group(1)
+
+
 def zone_text(domain, mail_ip, ns1_ip, ns2_ip, dkim_key=None, serial=None):
     domain = check_domain(domain)
     mail_ip = public_ipv4(mail_ip)
@@ -89,7 +104,9 @@ def main():
     parser.add_argument("--public-ip", required=True, help="Mail A record public IPv4")
     parser.add_argument("--ns1-ip", required=True, help="Public IPv4 for authoritative ns1")
     parser.add_argument("--ns2-ip", required=True, help="Public IPv4 for authoritative ns2")
-    parser.add_argument("--dkim-public-key", help="Public base64 DKIM p= key (never private key)")
+    dkim = parser.add_mutually_exclusive_group()
+    dkim.add_argument("--dkim-public-key", help="Public base64 DKIM p= key (never private key)")
+    dkim.add_argument("--dkim-txt-file", help="Read the public OpenDKIM mail.txt record safely")
     parser.add_argument("--output", default=".generated/dns")
     args = parser.parse_args()
 
@@ -98,8 +115,10 @@ def main():
     destination.mkdir(parents=True, exist_ok=True, mode=0o700)
     zone_path = destination / ("db." + domain)
     conf_path = destination / "named.conf.monico"
+    dkim_key = (read_opendkim_public_txt(args.dkim_txt_file)
+                if args.dkim_txt_file else args.dkim_public_key)
     zone = zone_text(domain, args.public_ip, args.ns1_ip, args.ns2_ip,
-                     args.dkim_public_key)
+                     dkim_key)
     zone_path.write_text(zone, encoding="utf-8")
     conf_path.write_text(named_config(domain, zone_path), encoding="utf-8")
     os.chmod(zone_path, 0o600)
