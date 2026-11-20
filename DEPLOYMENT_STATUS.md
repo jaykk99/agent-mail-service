@@ -71,6 +71,29 @@ The external mail probe never sends a message and cannot by itself certify
 cross-domain delivery. Regular carrier phone calling still requires a real
 telecom interconnect.
 
+## 1,000-agent real HTTP load verification
+
+The independent [Ubuntu Linux scale run](https://github.com/jaykk99/agent-mail-service/actions/runs/44799691874)
+passed **all three GitHub Actions jobs**, including the actual 1,000-agent
+HTTP messaging test. Against the real Python HTTP service and SQLite backend:
+
+- 1,000 distinct agents authenticated through the HTTP API with their
+  individual bearer tokens.
+- 1,000 HTTP text messages were sent and routed to 1,000 different inboxes.
+- 1,000 inboxes were read back, with expected sender and recipient data.
+- SQLite contained 1,000 durable messages from 1,000 distinct senders
+  to 1,000 distinct recipients.
+- After a real server shutdown and restart, sampled inbox messages,
+  agent identities, and credentials remained valid.
+- An unauthenticated request was denied.
+- With **16 client workers** on GitHub-hosted Ubuntu, measured execution
+  was 1.27s for authentication, 2.15s to send, and 1.41s to read. These
+  are runner-specific observations, not guaranteed production performance.
+
+Scope limitation: this exercised actual HTTP and SQLite on a **loopback
+test host**, not 1,000 simultaneously connected clients or external internet
+mail delivery. The site is not marked publicly reachable by these results.
+
 ## Local Linux launch
 
 ```bash
