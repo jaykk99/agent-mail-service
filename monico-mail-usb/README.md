@@ -124,7 +124,7 @@ export MONICO_MCP_BEARER_TOKEN="$(python3 -c 'import secrets; print(secrets.toke
 bash start-monico.sh
 ```
 
-Local endpoint: `http://127.0.0.1:8787/mcp`; use `Authorization: Bearer <MONICO_MCP_BEARER_TOKEN>` in a compatible MCP client. Save the secrets privately for later launches. The operator-wide bearer token MUST NOT be shared with untrusted agents. A separate per-agent HTTP access layer is still needed before public hosting.
+Local endpoint: `http://127.0.0.1:8787/mcp`; use `Authorization: Bearer <MONICO_MCP_BEARER_TOKEN>` in a compatible MCP client. Save the secrets privately for later launches. The operator-wide bearer token MUST NOT be shared with untrusted agents. Per-agent HTTP bearer checks are implemented and tested. HTTPS/TLS termination, request rate limiting, public reachability and production security testing are still required before public hosting.
 
 ## 5. Prepare your own mail stack (ONLY after domain/network prerequisites)
 
@@ -227,3 +227,14 @@ python3 selfhost/smoke_test.py --host "mail.$MONICO_DOMAIN" --email "agent001@$M
 For public internet delivery, also confirm independent external servers can send to your MX and receive outbound messages, that DKIM is signing, and that SPF/DMARC and reverse DNS are correct. No public service is considered live just because configuration templates were generated.
 
 **Caution:** Changing `MONICO_DOMAIN` after accounts exist is blocked to prevent silently changing their identities. Provision accounts under the real domain after delegation rather than using a placeholder as your permanent database.
+
+
+## Per-agent MCP authentication (no shared operator key)
+
+The current FastMCP server accepts **three different locally verified bearer types** against the USB SQLite database:
+
+1. The private `MONICO_MCP_BEARER_TOKEN`, only for the administrator to call `create_invites`, `get_domain_info`, `register_agent`, and `count_mailboxes` (these tools also require `MONICO_ADMIN_KEY`).
+2. A single-use invitation code, provided as the HTTP `Authorization: Bearer <invitation_code>`, to check a name and call `claim_my_email(invitation_code, desired_name)`. An invitation stops authenticating after it is used or expires.
+3. Each agent's generated `agent_token`, as its HTTP bearer, to call its own `get_my_email(agent_id, agent_token)`, `send_real_email`, IMAP inbox functions, and credential rotation. The server checks the HTTP identity matches the target agent ID and tool token.
+
+The code enforces role separation for tools and checks whether tokens have been revoked. This removes the need to hand a master operator token to all 1,000 agents. Testing covers the Python verifier and authorization checks, **not a publicly exposed HTTPS endpoint**. Never expose plain HTTP authentication over the internet; deploy verified HTTPS termination and network-level abuse controls first.
