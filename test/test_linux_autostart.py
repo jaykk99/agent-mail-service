@@ -27,6 +27,7 @@ class LinuxAutostartTests(unittest.TestCase):
         unit = autostart.render_service(Path(sys.executable), ROOT,
                                         state_dir=str(self.storage))
         self.assertIn("ExecStart=", unit)
+        self.assertIn("WorkingDirectory=" + str(ROOT) + "\n", unit)
         self.assertIn("watchdog.py", unit)
         self.assertIn('"--state-dir" "' + str(self.storage) + '"', unit)
         self.assertIn("NoNewPrivileges=yes", unit)
