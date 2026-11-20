@@ -27,6 +27,18 @@ The Postfix proxy-read map had been missing the required explicit
 was fixed in the generated configuration and verified by the actual
 SMTP/LMTP/IMAP integration, not a mock.
 
+## 1,000-agent quota correction
+
+System addresses `postmaster@...` and `abuse@...` are no longer counted
+against `MONICO_MAX_MAILBOXES=1000`. The registry now supports exactly
+**1,000 independent agent mailboxes PLUS both required system inboxes**.
+An untrusted agent cannot take either system identity. Invitation quotas
+use the configured registry limit rather than an unrelated default.
+
+[Linux mailbox tests](https://github.com/jaykk99/agent-mail-service/actions/runs/44807710785)
+verified the exact 1,000-agent boundary, 1,002 total on-disk mailboxes,
+and system/agent authorization separation on Python 3.11 and 3.13.
+
 ## Expanded real-mail validation (three independently named agents)
 
 The [expanded real agent mail test](https://github.com/jaykk99/agent-mail-service/actions/runs/44796213179)
