@@ -119,6 +119,32 @@ systemctl --user status monico-agent.service
 
 Chromebook Crostini may still suspend independently of systemd.
 
+## Independent internet verification result — November 20, 2026
+
+The repository's legacy Cloudflare Email Worker configuration references
+`https://agent-mail-service.onrender.com/api/inbound`. We therefore tested
+the historical Node backend's public `/health` endpoint from an unrelated
+GitHub-hosted Linux runner, using normal HTTPS certificate validation and
+no authentication secrets.
+
+**Observed result:** HTTP **503 Service Unavailable** on **three attempts**.
+The historical hosted Node API did **not** pass public availability
+verification in this run. This is a point-in-time observation, not proof
+that it can never recover or that a different Monico Linux host is offline.
+
+- [External Linux probe run and response codes](https://github.com/jaykk99/agent-mail-service/actions/runs/44799802062)
+- [The exact probe source](linux/probe_legacy_public.py)
+- [The independently runnable check](.github/workflows/monico-historical-public-check.yml)
+
+**Important:** That Render URL refers to the older Node API, not to the
+new Postfix/Dovecot/MCP Linux server. The Linux server's real public URL/IP,
+trusted CA and working network route have not been established in this repo,
+so independent internet reachability for Monico Linux is **not verified**.
+
+The separate [outside-network Linux mail/browser workflow](.github/workflows/monico-external-network-probe.yml)
+can test an *actual user-controlled* public IPv4 and public CA certificate.
+Never provide or commit the CA private key, mailbox password, or admin tokens.
+
 ## What still blocks public production approval
 
 1. **Internet mail:** An actual domain controlled/delegated by its parent,
