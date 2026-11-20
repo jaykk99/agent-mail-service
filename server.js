@@ -1458,6 +1458,40 @@ app.get('/health', async (req, res) => {
   }
 });
 
+// Operational readiness is separate from cheap HTTP liveness (/health).
+// A Render Free instance can answer HTTP while losing every in-memory
+// address on restart; never report that state as production-ready mail.
+app.get('/ready', async (_req, res) => {
+  const issues = [];
+  if (TOKEN === 'dev-token-change-me' || TOKEN.length < 32) {
+    issues.push('operator_token_insecure_or_missing');
+  }
+  if (!useSupabase) {
+    issues.push('persistent_storage_not_configured');
+  } else {
+    try {
+      const { error } = await supabase
+        .from('agent_emails').select('id').limit(1)
+        .abortSignal(AbortSignal.timeout(5000));
+      if (error) issues.push('persistent_storage_unavailable');
+    } catch (_error) {
+      issues.push('persistent_storage_unavailable');
+    }
+  }
+  const ready = issues.length === 0;
+  res.status(ready ? 200 : 503).json({
+    ok: ready,
+    component: 'legacy_node_http_api',
+    readiness: ready ? 'http_api_dependencies_available' : 'blocked',
+    issues,
+    durableStorageConfigured: useSupabase,
+    browserHttpOnly: !SMTP_ENABLED,
+    internetEmailDeliveryVerified: false,
+    pstnSmsVerified: false,
+    note: 'An HTTP readiness pass never proves real SMTP ingress, MX or email delivery',
+  });
+});
+
 // DNS records a domain owner must publish for this service to send and
 // receive real internet mail. Public by design: DNS is public, and this lets
 // a fresh deployment go live without transcribing values by hand. The DKIM
