@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from provision import provision
+from internal_mail import LocalMailRouter, MailError, INTERNAL_DOMAIN
 
 MAX_BODY = 16384
 
@@ -48,6 +49,7 @@ class AgentPhone:
                 CREATE INDEX IF NOT EXISTS events_recipient_kind_id
                     ON events(recipient,kind,id);
             ''')
+        self.mail = LocalMailRouter(self.db_path, identities)
         try:
             os.chmod(self.db_path, 0o600)
         except OSError:
@@ -165,8 +167,25 @@ def handler_factory(service, html_path):
                 return
             if path == '/api/me':
                 return self._reply(200, {'ok': True, 'extension': actor,
-                                         'agentId': service.phones[actor]['agentId']})
+                                         'agentId': service.phones[actor]['agentId'],
+                                         'email': service.phones[actor]['agentId'] + '@' + INTERNAL_DOMAIN})
+            if path == '/api/routes':
+                return self._reply(200, {'ok': True, 'internalMail': True,
+                    'internalMessaging': True, 'internalCallSignaling': True,
+                    'publicEmailRouting': False, 'publicPstnRouting': False,
+                    'publicSmsRouting': False, 'domain': INTERNAL_DOMAIN})
+            if path == '/api/mailboxes':
+                return self._reply(200, {'ok': True, 'addresses': service.mail.addresses(actor),
+                    'internetRoutable': False})
             qs = parse_qs(parsed.query)
+            if path == '/api/email/inbox':
+                after = self._cursor(qs, 'after', 0, 2**63-1)
+                limit = self._cursor(qs, 'limit', 50, 100)
+                if after is None or limit is None or limit == 0:
+                    return self._reply(400, {'ok': False, 'error': 'Invalid pagination'})
+                emails = service.mail.inbox(actor, after, limit)
+                return self._reply(200, {'ok': True, 'emails': emails,
+                    'cursor': emails[-1]['id'] if emails else after})
             if path == '/api/directory':
                 offset = self._cursor(qs, 'offset', 0, 100000)
                 limit = self._cursor(qs, 'limit', 100, 100)
@@ -191,11 +210,15 @@ def handler_factory(service, html_path):
 
         def do_POST(self):
             path = urlsplit(self.path).path
-            if path not in ('/api/messages', '/api/signals'):
+            if path not in ('/api/messages', '/api/signals', '/api/mailboxes', '/api/email/send', '/api/phone/claim'):
                 return self._reply(404, {'ok': False, 'error': 'Not found'})
             actor = self._actor()
             if actor is None:
                 return
+            if path == '/api/phone/claim':
+                return self._reply(200, {'ok': True, 'extension': actor,
+                    'agentId': service.phones[actor]['agentId'],
+                    'publicPhoneNumber': False})
             try:
                 size = int(self.headers.get('Content-Length', '-1'))
             except ValueError:
@@ -208,6 +231,27 @@ def handler_factory(service, html_path):
                 return self._reply(400, {'ok': False, 'error': 'Invalid JSON'})
             if not isinstance(body, dict):
                 return self._reply(400, {'ok': False, 'error': 'JSON object expected'})
+            if path == '/api/mailboxes':
+                try:
+                    address = service.mail.create_alias(actor, body.get('prefix'))
+                    return self._reply(201, {'ok': True, 'address': address,
+                                             'internetRoutable': False})
+                except MailError as exc:
+                    return self._reply(exc.status, {'ok': False, 'error': str(exc)})
+                except sqlite3.Error:
+                    return self._reply(503, {'ok': False, 'error': 'Storage unavailable'})
+            if path == '/api/email/send':
+                if not service.allow(actor, 'text'):
+                    return self._reply(429, {'ok': False, 'error': 'Agent rate limit exceeded'})
+                try:
+                    mail_id = service.mail.send(actor, body.get('from'), body.get('to'),
+                                                body.get('subject', ''), body.get('text'))
+                    return self._reply(201, {'ok': True, 'id': mail_id,
+                        'routedInternally': True, 'internetDelivered': False})
+                except MailError as exc:
+                    return self._reply(exc.status, {'ok': False, 'error': str(exc)})
+                except sqlite3.Error:
+                    return self._reply(503, {'ok': False, 'error': 'Storage unavailable'})
             recipient = service.recipient(body.get('to'))
             if recipient is None:
                 return self._reply(404, {'ok': False, 'error': 'Unknown internal extension'})
