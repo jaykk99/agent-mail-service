@@ -9,6 +9,12 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 # Opt in to BOTH services: phone/dashboard + separate named-mail MCP.
 # This leaves existing phone-only 'bash start.sh' behavior unchanged.
+# Public HTTPS for Monico's browser/internal-agent service (explicit opt-in).
+# Not a public SMTP/IMAP relay or cellular carrier phone service.
+if [ "${1-}" = "--public" ]; then
+  shift
+  exec python3 linux/public_manage.py "$@"
+fi
 if [ "${1-}" = "--full" ]; then
   shift
   exec python3 linux/manage.py "$@"
