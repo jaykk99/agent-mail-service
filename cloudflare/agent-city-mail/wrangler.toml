@@ -1,0 +1,19 @@
+name = "agent-city-mail"
+main = "src/index.js"
+compatibility_date = "2026-11-20"
+
+# FIRST create and migrate the database using the instructions in README.
+# Then uncomment and replace the placeholder binding with the database ID.
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "agent-city-mail"
+# database_id = "PASTE_YOUR_ACTUAL_D1_DATABASE_ID"
+
+[[send_email]]
+name = "EMAIL"
+
+# Do not commit MAIL_DOMAIN or BRIDGE_TOKEN unless domain is yours.
+# npx wrangler secret put MAIL_DOMAIN
+# npx wrangler secret put BRIDGE_TOKEN
+# Configure Cloudflare Email Service and an Email Routing catch-all
+# to this Worker. A Worker deployment alone cannot establish mail delivery.
