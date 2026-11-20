@@ -1,5 +1,6 @@
 """Self-hosted mailbox identity and credentials; public SMTP deployment is separate."""
 import hashlib
+from contextlib import contextmanager
 import hmac
 import re
 import secrets
@@ -53,10 +54,16 @@ class Registry:
             )""")
             c.execute("""CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, created INTEGER NOT NULL)""")
 
+    @contextmanager
     def connect(self):
+        """Commit or roll back the operation and always close the SQLite handle."""
         c = sqlite3.connect(self.db, timeout=20)
-        c.execute("PRAGMA busy_timeout=20000")
-        return c
+        try:
+            c.execute("PRAGMA busy_timeout=20000")
+            with c:
+                yield c
+        finally:
+            c.close()
 
     @staticmethod
     def hash_token(token):
