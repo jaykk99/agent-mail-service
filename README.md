@@ -1,5 +1,13 @@
 # Agent Mail Service
 
+**Deployment status:** The Monico Linux mail transport has passed real Ubuntu
+Postfix → Dovecot → IMAP integration tests. The public Internet host is **not
+verified live**. The historical Render Node API returned repeated HTTP 503
+responses and is a separate optional backend. See the
+[verified deployment report](DEPLOYMENT_STATUS.md) and
+[Render recovery guide](RENDER_RECOVERY.md). A green GitHub CI run is not a
+public mail or telephone network connection.
+
 ## Run the complete LOCAL agent communication stack on Linux
 
 The older `bash start.sh` launches the phone/internal-message service only.
