@@ -10,12 +10,15 @@ import imaplib
 import json
 import os
 from pathlib import Path
+import sys
 import smtplib
 import ssl
 import time
 import uuid
 from email.message import EmailMessage
 
+# Permit direct execution as "python3 ci/real_mail_assertions.py".
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from monico_core import Registry
 
 DATA = Path(os.environ["MONICO_CI_DATA"])
