@@ -36,7 +36,7 @@ def read_opendkim_public_txt(path):
     merged = "".join(quoted)
     if not merged.startswith("v=DKIM1;"):
         raise ValueError("Invalid OpenDKIM public TXT file")
-    match = re.search(r"(?:^|;)\\s*p=([A-Za-z0-9+/=]+)", merged)
+    match = re.search(r"(?:^|;)\s*p=([A-Za-z0-9+/=]+)", merged)
     if not match or not _DKIM_KEY.fullmatch(match.group(1)):
         raise ValueError("Invalid OpenDKIM public DKIM key")
     return match.group(1)
