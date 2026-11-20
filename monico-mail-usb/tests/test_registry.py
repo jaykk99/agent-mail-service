@@ -57,6 +57,35 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.reg.send_internal("agent_001", alice["token"], "person@gmail.com", "Hello", "Body")
 
+    def test_independent_mail_password(self):
+        first = self.reg.register("agent_001", "alice")
+        self.assertIn("mail_password", first)
+        self.assertNotEqual(first["token"], first["mail_password"])
+        with self.reg.connect() as db:
+            row = db.execute("SELECT password_hash FROM mail_accounts WHERE email=?", (first["email"],)).fetchone()
+        self.assertEqual(row[0], self.reg.hash_token(first["mail_password"]))
+        self.assertNotEqual(row[0], first["mail_password"])
+        repeated = self.reg.register("agent_001", "alice")
+        self.assertNotIn("mail_password", repeated)
+
+    def test_rotate_mail_password(self):
+        first = self.reg.register("agent_001", "alice")
+        rotated = self.reg.rotate_mail_password("agent_001", first["token"])
+        self.assertEqual(rotated["email"], first["email"])
+        self.assertNotEqual(rotated["mail_password"], first["mail_password"])
+        with self.reg.connect() as db:
+            row = db.execute("SELECT password_hash FROM mail_accounts WHERE email=?", (first["email"],)).fetchone()
+        self.assertEqual(row[0], self.reg.hash_token(rotated["mail_password"]))
+        with self.assertRaises(ValueError):
+            self.reg.rotate_mail_password("agent_001", "wrong-token")
+
+    def test_thousand_accounts(self):
+        for number in range(1000):
+            first = self.reg.register(f"agent_{number:04}", f"agent{number:04}")
+            self.assertIn("@mail.example.invalid", first["email"])
+            self.assertTrue(first["mail_password"])
+        self.assertEqual(self.reg.mailbox_count(), 1000)
+
     def test_missing_usb(self):
         with self.assertRaises(RuntimeError):
             Registry(self.tmp.name + "/missing", "example.invalid")
