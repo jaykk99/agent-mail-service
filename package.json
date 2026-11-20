@@ -5,8 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/unit.test.js && node test/e2e.test.js",
-    "check": "node --check server.js && node --check test/e2e.test.js && node --check test/unit.test.js"
+    "test": "node test/unit.test.js && node test/e2e.test.js && node cloudflare/email-worker/test/extract.test.js",
+    "check": "node --check server.js && node --check test/e2e.test.js && node --check test/unit.test.js && node --check cloudflare/email-worker/src/extract.js && node --check cloudflare/email-worker/src/index.js && node --check cloudflare/email-worker/test/extract.test.js"
   },
   "engines": {
     "node": ">=18"

@@ -21,6 +21,10 @@ DKIM-signed so it is deliverable.
     Routing receives at the MX and the worker delivers over HTTPS. Auth is
     `Bearer $AGENT_MAIL_INBOUND_SECRET` (falling back to the API token when
     the secret is unset); both stores land in the same inbox store.
+- **`cloudflare/email-worker/`** — ready-made Cloudflare Email Worker for
+  that path: catch-all Email Routing, `postal-mime` parsing, code/link
+  extraction, delivery to `/api/inbound`, and an optional agent webhook. See
+  [Catch-all receiving](#catch-all-receiving-with-cloudflare-email-workers-free).
   - **REST API** (default port 3000, Bearer-token auth, 50 KB request-body
     cap) lists inboxes, fetches full emails, polls or long-polls for
     verification links, and clears inboxes. Requests are logged as
@@ -312,3 +316,46 @@ Notes:
   forwarder (e.g. an Email Worker) but is not needed for this setup.
 - Persistence: set `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` (free tier) or
   accept in-memory storage, which is lost on restart.
+
+### Catch-all receiving with Cloudflare Email Workers (free)
+
+Cloudflare Email Routing accepts mail for the domain at Cloudflare's MX and
+hands every message to a Worker, so no host of your own needs port 25. The
+worker in `cloudflare/email-worker/` parses the raw message with
+`postal-mime`, extracts the best one-time code and action link, POSTs the
+full message to `/api/inbound` (so it lands in that address's inbox), and
+optionally POSTs `{ to, from, subject, code, link }` to your own agent
+webhook for memory/database writes.
+
+1. Add the domain to Cloudflare (free plan) and change its nameservers at the
+   registrar. Cloudflare then hosts DNS, so the MX/SPF records below are in
+   the same place as your DKIM/DMARC records.
+2. Dashboard -> Email -> Email Routing -> Enable. Cloudflare creates the MX
+   and SPF records for the domain automatically.
+3. Deploy the worker:
+
+   ```bash
+   cd cloudflare/email-worker
+   npm install
+   npx wrangler login
+   npx wrangler secret put INBOUND_SECRET   # = AGENT_MAIL_INBOUND_SECRET
+   npx wrangler deploy
+   ```
+
+   Set `INBOUND_URL` in `wrangler.toml` to your service's `/api/inbound`
+   first. For the optional agent push, also set `AGENT_WEBHOOK_URL` there and
+   `AGENT_WEBHOOK_SECRET` via `wrangler secret put`.
+4. Dashboard -> Email Routing -> Routes -> Catch-all address -> Send to
+   Worker -> `agent-mail-inbound`. Every address at the domain, including
+   ones created after this step, now reaches the worker.
+5. On the service set `MAIL_DOMAIN=yourdomain.com` and the same
+   `AGENT_MAIL_INBOUND_SECRET`. `POST /api/accounts` and
+   `POST /api/addresses` then mint `@yourdomain.com` addresses.
+6. Test: create an account and an address, sign that address up somewhere,
+   then `GET /api/code/<address>` (or `/api/wait/<address>`) with the
+   account key. The worker delivers in seconds; the reply is the code.
+
+Delivery failures from `/api/inbound` make the worker throw, so Cloudflare
+retries the message instead of dropping a verification email. Keep
+`DMARC_POLICY=none` until `/api/dns` reports `dkim: configured` and a test
+message shows `dkim=pass`, then raise it to `quarantine`.

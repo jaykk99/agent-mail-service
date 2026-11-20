@@ -1,0 +1,13 @@
+name = "agent-mail-inbound"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+[vars]
+# Backend that stores the mail. Point this at your deployment.
+INBOUND_URL = "https://agent-mail-service.onrender.com/api/inbound"
+# Optional: push the extracted code/link straight to agent memory/database.
+# AGENT_WEBHOOK_URL = "https://your-agent.example.com/hooks/mail"
+
+# Secrets (never put values in this file):
+#   npx wrangler secret put INBOUND_SECRET        # = AGENT_MAIL_INBOUND_SECRET
+#   npx wrangler secret put AGENT_WEBHOOK_SECRET  # optional, for AGENT_WEBHOOK_URL
