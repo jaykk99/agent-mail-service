@@ -892,7 +892,11 @@ function validAddressParam(addr) {
   if (typeof addr !== 'string' || addr.length === 0 || addr.length > 254) return false;
   const at = addr.indexOf('@');
   if (at <= 0 || at !== addr.lastIndexOf('@') || at === addr.length - 1) return false;
-  return /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(addr);
+  // Dotted domains (production) plus bare `localhost` (the default local
+  // domain for loopback testing; without this the inbox API 400s on every
+  // @localhost address even though SMTP accepts and stores the mail).
+  return /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(addr)
+    || /^[a-z0-9._%+-]+@localhost$/.test(addr);
 }
 
 // Normalize a Supabase row or in-memory object to the API email shape

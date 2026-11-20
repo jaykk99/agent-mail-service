@@ -1,0 +1,49 @@
+# Postfix main.cf template for the agent-mail-service stack (Linux).
+#
+# Install: copy to /etc/postfix/main.cf (install-validate.sh does this),
+# replacing __MAIL_DOMAIN__ with the real domain (e.g. agents.errorinbox.qd.je
+# once Jay claims it; for a loopback-only test use test.local).
+#
+# Validated live 2026-11-20 in the sandbox (Postfix 3.8.6): SMTP accept ->
+# virtual delivery into a real Maildir -> IMAP login/fetch. Three gotchas
+# found during validation are baked in below and commented where they bite:
+#   1. compatibility_level MUST be set, or smtpd_relay_restrictions
+#      defaults to empty and smtpd dies on every connection ("specify at
+#      least one working instance of: reject_unauth_destination ...").
+#   2. smtpd_relay_restrictions / smtpd_recipient_restrictions are set
+#      explicitly for the same reason; never rely on the built-in default.
+#   3. The map directory and every parent must be traversable by the
+#      `postfix` user, and /var/mail/vhosts must be 755 (not 2770), or
+#      the virtual agent fails with "Permission denied" / "maildir
+#      delivery failed". The daemon caches a failed map open, so after a
+#      permission fix you must `postfix stop` + `postfix start` (a reload
+#      is not enough).
+
+myhostname = mx.__MAIL_DOMAIN__
+mydomain = __MAIL_DOMAIN__
+myorigin = $mydomain
+inet_interfaces = all
+mydestination =
+virtual_mailbox_domains = __MAIL_DOMAIN__
+virtual_mailbox_base = /var/mail/vhosts
+virtual_mailbox_maps = hash:/etc/postfix/virtual
+virtual_uid_maps = static:5000
+virtual_gid_maps = static:5000
+smtpd_banner = $myhostname ESMTP
+mynetworks = 127.0.0.0/8
+smtpd_relay_restrictions = permit_mynetworks, permit_sasl_authenticated, defer_unauth_destination
+smtpd_recipient_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination
+compatibility_level = 3.6
+
+# DKIM signing is done by OpenDKIM as a milter (see dns-tls-pack.md).
+# Uncomment once opendkim is configured with the real key:
+# smtpd_milters = inet:127.0.0.1:8891
+# non_smtpd_milters = inet:127.0.0.1:8891
+# milter_default_action = accept
+
+# Log to a file as well as syslog; on a box without a running syslog daemon
+# this is the only place Postfix logs land. Keep the prefixes line or
+# postfix refuses to start ("maillog_file value ... does not match any
+# prefix in maillog_file_prefixes").
+maillog_file = /var/log/postfix.log
+maillog_file_prefixes = /var/log/

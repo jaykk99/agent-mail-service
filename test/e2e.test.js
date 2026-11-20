@@ -36,7 +36,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 
 const PORT = 3310;
-const SMTP_PORT = 2526;
+const SMTP_PORT = 2529; // not 2526: that is Calling-linux's SMTP listener when the stack is up; 2527/2528 are used by sub-servers below
 const TOKEN = 'test-token-abc123';
 const DOMAIN = 'mail.example.test';
 const INBOUND_SECRET = 'test-inbound-secret-xyz';
