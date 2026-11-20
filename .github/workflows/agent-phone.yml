@@ -1,0 +1,25 @@
+name: Agent Phone (standard-library tests)
+on:
+  pull_request:
+    paths:
+      - 'phone/**'
+      - 'test/test_phone*.py'
+      - '.github/workflows/agent-phone.yml'
+  push:
+    paths:
+      - 'phone/**'
+      - 'test/test_phone*.py'
+      - '.github/workflows/agent-phone.yml'
+permissions:
+  contents: read
+jobs:
+  phone-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify on system Python (no pip installs)
+        run: |
+          python3 --version
+          python3 -m py_compile phone/provision.py phone/server.py phone/mcp.py
+          python3 -m unittest discover -s test -p 'test_phone*.py' -v
