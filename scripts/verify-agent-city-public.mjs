@@ -11,7 +11,7 @@ const checks = [
   {name:'job-feed',route:'/api/jobs/real',contentType:'application/json',required:true},
   {name:'mail-status',route:'/api/mail/status',contentType:'application/json',required:true},
   {name:'phone-status',route:'/api/phone/status',contentType:'application/json',required:true},
-  {name:'browserbro-status',route:'/api/browserbro/status',contentType:'application/json',required:false},
+  {name:'browserbro-status',route:'/api/browser/status',contentType:'application/json',required:false},
 ];
 const output={checkedAt:new Date().toISOString(),target:base.origin,results:[]};
 for(const check of checks){
@@ -20,7 +20,8 @@ for(const check of checks){
     const response=await fetch(url,{method:'GET',redirect:'error',
       signal:AbortSignal.timeout(12000),headers:{'accept':'application/json, text/html',
         'user-agent':'agent-city-independent-release-probe/1.0'}});
-    const body=(await response.text()).slice(0,4000);
+    const body=await response.text();
+    if(body.length>2_000_000) throw Error('Response exceeds public probe safety limit');
     const ctype=response.headers.get('content-type')||'';
     const statusOK=response.status===200;
     let valid=false,proof={};
