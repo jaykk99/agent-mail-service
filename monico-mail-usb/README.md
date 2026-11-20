@@ -1,10 +1,60 @@
 # Monico Mail USB — independent Linux-hosted mailboxes
 
-**Goal:** Up to 1,000+ independent email addresses, one per AI agent, with separate IMAP/SMTP credentials, mailbox identities in SQLite and future real mail delivery through **your own** Postfix/Dovecot Linux mail server. **No Gmail, Outlook or third-party mailbox provider is used.**
+**Goal:** Up to 1,000+ independent, **agent-named** email addresses, chosen by each agent, with separate IMAP/SMTP credentials, mailbox identities in SQLite and future real mail delivery through **your own** Postfix/Dovecot Linux mail server. **No Gmail, Outlook or third-party mailbox provider is used.**
+
+## Choose your own domain and email name (new)
+
+**You choose the domain; agents choose their own names.** Examples (illustrative only):
+
+- One agent claims `sales@yourdomain.com`
+- Another claims `research@yourdomain.com`
+- Another claims `myshop@yourdomain.com`
+
+The internal `agent_id` is generated separately and is **not** used as the email name.
+
+**Important domain limit:** Monico cannot make `yourdomain.com` a real public domain unless it has been delegated to you by the global DNS hierarchy. You can run all your own DNS/mail software without Gmail or a paid email host, but domain delegation itself cannot be bypassed. Do not type a domain you do not control and expect public email to work.
+
+### Configure a domain locally on Linux
+
+From `agent-mail-service/monico-mail-usb`, after sharing the USB drive with Linux:
+
+```bash
+export MONICO_DATA="/mnt/chromeos/removable/YOUR_USB/monico"
+mkdir -p "$MONICO_DATA"
+python3 selfhost/configure_domain.py --domain your-actually-delegated-domain.tld --data "$MONICO_DATA"
+source "$HOME/.config/monico-mail/domain.env"
+echo "$MONICO_DOMAIN"
+```
+
+Replace the sample with **your actual delegated domain or subdomain**. The configurator saves `MONICO_DOMAIN` privately, checks for an existing database using a different domain, and does *not* register DNS. The startup script loads this saved domain automatically when `MONICO_DOMAIN` is not already exported. If you previously created test accounts at `mail.example.invalid`, use a new empty USB data directory for the real domain (or migrate existing accounts explicitly); Monico prevents silent address changes.
+
+### Give agents their own choice of email name
+
+Create one-time signup invitations on your own Linux machine:
+
+```bash
+python3 mailbox_admin.py issue-invites --count 10 --valid-days 7
+```
+
+Each invitation is a random, single-use secret. Give **one code privately to each agent**. The agent picks its own desired name when claiming, for example:
+
+```bash
+python3 mailbox_admin.py claim sales
+python3 mailbox_admin.py claim research
+python3 mailbox_admin.py claim myshop
+```
+
+The `claim` command asks for the invitation code without echoing it. Each claim creates a permanent mailbox such as `sales@$MONICO_DOMAIN`, its own randomly generated **mail password**, and a different **MCP agent token**. Save both credentials securely when they are first displayed. Names are case-insensitive, unique, and first-come-first-served; reserved administrative names cannot be claimed.
+
+For agents already connected to the **private operator-authenticated MCP**, the equivalent tools are `check_email_name(desired_name)`, `claim_my_email(invitation_code, desired_name)`, and admin-only `create_invites(admin_key, count, valid_days)`. The `get_domain_info(admin_key)` tool reports configured domain and free slots. **Do not give the operator-wide HTTP bearer key to untrusted agents**: a separate per-agent HTTP access layer is still required before offering remote self-service signup.
+
+The default capacity is 1,000 mailboxes; you can issue up to 200 invitations per batch. Issued invitations expire and can only be used once. This creates identities on your Linux host, **not live public email delivery** until Postfix/Dovecot and the public DNS/network are deployed.
+
+---
 
 ## Status (read before deploying)
 
-- **Built:** persistent agent registry, unique addresses, independent one-time mail passwords and MCP tokens, password rotation, local agent-to-agent messages, Postfix/Dovecot 2.3 and 2.4 config generator, local mailbox management CLI, unit tests.
+- **Built:** self-chosen unique mailbox names with invitation onboarding, configurable domain, persistent registry, independent one-time mail passwords and MCP tokens, password rotation, local agent-to-agent messages, Postfix/Dovecot 2.3 and 2.4 config generator, local mailbox management CLI, unit tests.
 - **Tested locally:** 1,000 distinct identities and password/persistence/isolation operations against a local copy of the registry code.
 - **NOT yet deployed or verified:** real public inbound/outbound SMTP, TLS certificates, DKIM signing, DNS/PTR, Dovecot/Postfix integration on your Chromebook, securely exposed MCP endpoint and ChromeOS/USB permissions. **Do not expose the MCP service publicly.**
 - MCP's internal SQLite-message inbox and the future Dovecot Maildir inbox are different storage systems. Incoming SMTP mail into Dovecot is not yet displayed by the MCP `list_inbox` tool; use IMAP when the mail stack is deployed.
