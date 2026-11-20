@@ -11,3 +11,7 @@ phone-data/
 **/messages.sqlite3
 **/messages.sqlite3-*
 **/__pycache__/
+
+# Self-hosted Linux server process files
+**/server.pid
+**/server.log

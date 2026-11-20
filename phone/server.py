@@ -28,6 +28,11 @@ class AgentPhone:
         provision(self.state_dir, count)
         identities = json.loads((self.state_dir / 'identities.json').read_text())['extensions']
         self.phones = identities
+        # Random high-entropy credential fingerprint identifies this specific
+        # storage vault, preventing accidental cross-connection on reused ports.
+        self.instance_id = hashlib.sha256(
+            identities["2000"]["apiToken"].encode("utf-8")
+        ).hexdigest()[:16]
         self.token_hashes = {
             hashlib.sha256(item['apiToken'].encode()).digest(): number
             for number, item in identities.items()
@@ -150,7 +155,9 @@ def handler_factory(service, html_path):
             path = parsed.path
             if path == '/health':
                 return self._reply(200, {'ok': True, 'internalOnly': True,
-                                         'publicNumbers': False, 'agents': len(service.phones)})
+                                         'publicNumbers': False, 'agents': len(service.phones),
+                                         'instanceId': service.instance_id,
+                                         'privateDomain': 'agents.localhost'})
             if path == '/':
                 data = html_path.read_bytes()
                 self.send_response(200)
@@ -171,7 +178,10 @@ def handler_factory(service, html_path):
                                          'email': service.phones[actor]['agentId'] + '@' + INTERNAL_DOMAIN})
             if path == '/api/routes':
                 return self._reply(200, {'ok': True, 'internalMail': True,
-                    'internalMessaging': True, 'internalCallSignaling': True,
+                    'internalMessaging': True, 'internalSms': True,
+                    'internalCallSignaling': True,
+                    'privateWebDomain': 'agents.localhost',
+                    'publicDomain': False,
                     'publicEmailRouting': False, 'publicPstnRouting': False,
                     'publicSmsRouting': False, 'domain': INTERNAL_DOMAIN})
             if path == '/api/mailboxes':
@@ -195,14 +205,16 @@ def handler_factory(service, html_path):
                 return self._reply(200, {'ok': True, 'total': len(phones), 'agents': [
                     {'extension': ext, 'agentId': service.phones[ext]['agentId']}
                     for ext in phones[offset:offset + limit]]})
-            if path in ('/api/messages', '/api/signals'):
+            if path in ('/api/messages', '/api/signals', '/api/sms/inbox'):
                 after = self._cursor(qs, 'after', 0, 2**63 - 1)
                 limit = self._cursor(qs, 'limit', 50, 100)
                 if after is None or limit is None or limit == 0:
                     return self._reply(400, {'ok': False, 'error': 'Invalid pagination'})
-                kind = 'text' if path == '/api/messages' else 'signal'
+                kind = 'text' if path in ('/api/messages', '/api/sms/inbox') else 'signal'
                 events = service.events(actor, kind, after, limit)
                 return self._reply(200, {'ok': True, 'events': events,
+                                         'internalOnly': path == '/api/sms/inbox',
+                                         'carrierSms': False,
                                          'cursor': events[-1]['id'] if events else after})
             if path == '/api/signals/cursor':
                 return self._reply(200, {'ok': True, 'cursor': service.cursor(actor, 'signal')})
@@ -210,7 +222,7 @@ def handler_factory(service, html_path):
 
         def do_POST(self):
             path = urlsplit(self.path).path
-            if path not in ('/api/messages', '/api/signals', '/api/mailboxes', '/api/email/send', '/api/phone/claim'):
+            if path not in ('/api/messages', '/api/signals', '/api/sms/send', '/api/mailboxes', '/api/email/send', '/api/phone/claim'):
                 return self._reply(404, {'ok': False, 'error': 'Not found'})
             actor = self._actor()
             if actor is None:
@@ -257,7 +269,7 @@ def handler_factory(service, html_path):
                 return self._reply(404, {'ok': False, 'error': 'Unknown internal extension'})
             if recipient == actor:
                 return self._reply(400, {'ok': False, 'error': 'Cannot send to self'})
-            kind = 'text' if path == '/api/messages' else 'signal'
+            kind = 'text' if path in ('/api/messages', '/api/sms/send') else 'signal'
             if kind == 'text':
                 message = body.get('text')
                 if not isinstance(message, str) or not (1 <= len(message) <= 2000):
@@ -276,7 +288,9 @@ def handler_factory(service, html_path):
                 event_id = service.insert(actor, recipient, kind, payload)
             except sqlite3.Error:
                 return self._reply(503, {'ok': False, 'error': 'Storage unavailable'})
-            return self._reply(201, {'ok': True, 'id': event_id, 'to': recipient, 'from': actor})
+            return self._reply(201, {'ok': True, 'id': event_id,
+                                     'to': recipient, 'from': actor,
+                                     'internalOnly': True, 'carrierSms': False})
 
         def log_message(self, fmt, *args):
             # Don't log potentially sensitive URL paths or Authorization headers.
