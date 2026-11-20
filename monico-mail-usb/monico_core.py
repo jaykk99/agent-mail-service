@@ -19,6 +19,9 @@ class Registry:
         if not isinstance(domain, str) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{2,252}", domain):
             raise ValueError("Invalid mailbox domain")
         self.domain = domain
+        self.capacity = int(__import__("os").environ.get("MONICO_MAX_MAILBOXES", "1000"))
+        if self.capacity < 1:
+            raise ValueError("MONICO_MAX_MAILBOXES must be positive")
         self.db = self.directory / "agents.sqlite3"
         with self.connect() as c:
             c.execute("""CREATE TABLE IF NOT EXISTS agents (
@@ -65,9 +68,20 @@ class Registry:
         if not LOCAL_RE.fullmatch(desired_name) or ".." in desired_name or desired_name in RESERVED:
             raise ValueError("Invalid or reserved email name")
         with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
             old = c.execute("SELECT email FROM agents WHERE agent_id=?", (agent_id,)).fetchone()
             if old:
                 return {"email": old[0], "agent_id": agent_id, "existing": True}
+            now = int(time.time())
+            used = c.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
+            table_exists = c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mailbox_invites'"
+            ).fetchone()
+            pending = (c.execute(
+                "SELECT COUNT(*) FROM mailbox_invites WHERE redeemed IS NULL AND expires>?",
+                (now,)).fetchone()[0] if table_exists else 0)
+            if used + pending >= self.capacity:
+                raise ValueError("Mailbox capacity reached or all remaining slots are reserved")
             token = secrets.token_urlsafe(32)
             mail_password = secrets.token_urlsafe(32)
             email = f"{desired_name}@{self.domain}"
