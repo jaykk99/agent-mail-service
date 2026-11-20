@@ -1,0 +1,40 @@
+name: Agent Mail Node tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'server.js'
+      - 'test/**'
+      - 'package*.json'
+      - '.github/workflows/node-tests.yml'
+      - 'cloudflare/email-worker/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'server.js'
+      - 'test/**'
+      - 'package*.json'
+      - '.github/workflows/node-tests.yml'
+      - 'cloudflare/email-worker/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install from lockfile
+        run: npm ci
+      - name: Check JavaScript syntax
+        run: npm run check
+      - name: Run existing unit and local integration suites
+        run: npm test
