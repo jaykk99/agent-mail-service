@@ -17,7 +17,10 @@ import tempfile
 
 
 def check_domain(domain):
-    from generate_config import check_domain as validated
+    try:
+        from .generate_config import check_domain as validated
+    except ImportError:
+        from generate_config import check_domain as validated
     return validated(domain)
 
 
