@@ -1,5 +1,13 @@
 #!/bin/sh
-# Run the local agent communications network (no pip / npm installation).
+# Single command on Linux: discover USB, start all LOCAL routes and MCP-ready server.
+# Keeps running after this terminal closes; no cloud or pip/npm required.
 set -eu
 cd "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Python 3 is required (usually preinstalled on Chromebook Linux)." >&2
+  exit 1
+fi
+if [ "$#" -eq 0 ]; then
+  exec python3 phone/start.py --daemon
+fi
 exec python3 phone/start.py "$@"
