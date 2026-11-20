@@ -20,6 +20,7 @@ from email.message import EmailMessage
 # Permit direct execution as "python3 ci/real_mail_assertions.py".
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from monico_core import Registry
+from selfhost.mail_client import SelfHostedMail
 
 DATA = Path(os.environ["MONICO_CI_DATA"])
 DOMAIN = os.environ["MONICO_CI_DOMAIN"]
@@ -167,6 +168,45 @@ def main():
     record("SMTP sender impersonation rejected", rejected_sender_spoof())
     record("agent credentials cannot read other agent inbox",
            rejected_bad_imap("research", password_for("support")))
+
+    # Exercise the exact production SMTP/IMAP adapter used by the MCP tools.
+    reg = Registry(DATA, DOMAIN)
+    api = SelfHostedMail(reg, HOST)
+    api_subject = "Real MCP-adapter transport " + uuid.uuid4().hex
+    result = api.send(
+        CREDS["notifications"]["agent_id"],
+        CREDS["notifications"]["token"],
+        password_for("notifications"),
+        email_for("research"),
+        api_subject,
+        "Actual content from the Monico mail client to a real Dovecot inbox",
+    )
+    record("actual Monico SMTP client submits into real Postfix", result["submitted"])
+    deadline = time.monotonic() + 35
+    matching = []
+    while time.monotonic() < deadline:
+        entries = api.inbox(CREDS["research"]["agent_id"],
+                            CREDS["research"]["token"], password_for("research"))
+        matching = [item for item in entries if item["subject"] == api_subject]
+        if matching:
+            break
+        time.sleep(1)
+    record("actual Monico IMAP client lists message from real Dovecot", bool(matching))
+    body = api.read(CREDS["research"]["agent_id"], CREDS["research"]["token"],
+                    password_for("research"), matching[0]["uid"])
+    record("actual Monico IMAP client reads correct plaintext body",
+           "Actual content from the Monico mail client" in body["body"])
+    sent = api.sent(CREDS["notifications"]["agent_id"],
+                    CREDS["notifications"]["token"])
+    record("actual Monico SMTP submissions recorded for the correct agent",
+           any(item["subject"] == api_subject for item in sent))
+    try:
+        api.inbox(CREDS["research"]["agent_id"], CREDS["support"]["token"],
+                  password_for("research"))
+    except ValueError:
+        record("Monico MCP mail adapter blocks agent token crossover")
+    else:
+        raise AssertionError("FAIL: Monico MCP mail adapter accepted another agent token")
 
     # Live Dovecot/Postfix must read rotated hashes; no restart or mock client.
     reg = Registry(DATA, DOMAIN)
