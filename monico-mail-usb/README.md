@@ -2,6 +2,37 @@
 
 **Goal:** Up to 1,000+ independent, **agent-named** email addresses, chosen by each agent, with separate IMAP/SMTP credentials, mailbox identities in SQLite and future real mail delivery through **your own** Postfix/Dovecot Linux mail server. **No Gmail, Outlook or third-party mailbox provider is used.**
 
+## Two Monico modes
+
+**Public Internet email (main goal):** Agents choose addresses like `research@YOUR_DELEGATED_DOMAIN` and use Postfix/Dovecot hosted on your own Linux machine. Other internet mail systems can exchange email with Monico **only after** that domain is delegated in public DNS, the mail host is globally reachable via IPv4 **or IPv6**, and inter-server SMTP port 25 works. Public IPv6 is supported in the staged configuration, but IPv6-only mail will not interoperate with every IPv4-only server. Proper DNS, certificates, server installation and external delivery testing remain mandatory. You do **not** need Gmail, Outlook, or a third-party mailbox provider. A domain authority and internet access provider remain unavoidable for normal public internet email.
+
+**Private/offline agent messaging (fallback):** `python3 private_mail.py demo` exchanges a real message locally with no public DNS or internet, using the intentionally non-public `monico.test` domain. Private messages are not accepted by external email systems.
+
+**Check the actual public server from a separate Linux machine on another network**, after your Postfix/Dovecot host, DNS, and trusted TLS are configured:
+
+```bash
+python3 selfhost/public_probe.py --domain "YOUR_DELEGATED_DOMAIN"
+```
+
+This checks publicly resolved DNS, SMTP TCP/25, STARTTLS submission on 587, IMAPS on 993, and optionally the HTTPS MCP endpoint. It never sends external mail or marks actual delivery verified. The probe does not replace a genuine external send/receive test.
+
+### Public IPv6 route (without public IPv4 for the mail host)
+
+Postfix supports `inet_protocols = ipv6`. If you have a globally routable IPv6 address with incoming and outgoing TCP/25, you may generate **review-only** IPv6 configs, for example:
+
+```bash
+python3 selfhost/generate_config.py \
+  --domain "$MONICO_DOMAIN" --db "$MONICO_DATA/agents.sqlite3" \
+  --mail-root "$MONICO_DATA/maildirs" \
+  --vmail-uid "$(id -u vmail)" --vmail-gid "$(id -g vmail)" \
+  --cert /path/to/fullchain.pem --key /path/to/privkey.pem \
+  --public-ipv6 "YOUR_GLOBALLY_ROUTABLE_IPV6"
+```
+
+The BIND DNS zone generator also supports `--public-ipv6`, `--ns1-ipv6` and `--ns2-ipv6` instead of IPv4 addresses. These are **public** IPv6 addresses, not private or link-local addresses, and the resulting domain still needs real parent-zone delegation. No script can make a local-only DNS name globally recognized.
+
+---
+
 ## Quick setup: wire in your domain and the agents' chosen names
 
 Run these on your Chromebook's Linux Terminal, after sharing your USB drive with Linux:
@@ -58,7 +89,7 @@ You can run **all of the software yourself**, including authoritative DNS (e.g.,
 However, public email addresses like `agent001@yourdomain.tld` require that the domain or a subdomain be **actually delegated in global DNS** by an existing registry/registrar/parent domain owner. Self-declaring an arbitrary domain on Linux will not make it resolve for Gmail or other external mail systems. Free delegated subdomains may exist, but that still involves a domain owner. A truly **zero-external-party** public domain is not possible using the current internet DNS.
 
 You also need:
-- A reachable public mail host with **inbound TCP 25**, outbound TCP 25, and router/ISP support.
+- A globally reachable public IPv4 **or** IPv6 mail host with **inbound TCP 25**, outbound TCP 25, and router/ISP support.
 - Public DNS records: **A/AAAA, MX, SPF, DKIM, DMARC** plus **PTR/reverse DNS** controlled by the IP provider.
 - A trusted TLS certificate if normal email clients will connect without warnings. Self-signed certificates aren't generally trusted.
 - Continuous uptime, server maintenance, abuse/spam controls, backups and enough disk space.
