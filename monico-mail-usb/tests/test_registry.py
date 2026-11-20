@@ -80,11 +80,23 @@ class RegistryTests(unittest.TestCase):
             self.reg.rotate_mail_password("agent_001", "wrong-token")
 
     def test_thousand_accounts(self):
+        # Postmaster and abuse are required system inboxes IN ADDITION TO agents.
+        self.reg.provision_system_mailbox("postmaster")
+        self.reg.provision_system_mailbox("abuse")
         for number in range(1000):
             first = self.reg.register(f"agent_{number:04}", f"agent{number:04}")
             self.assertIn("@mail.example.invalid", first["email"])
             self.assertTrue(first["mail_password"])
         self.assertEqual(self.reg.mailbox_count(), 1000)
+        self.assertEqual(self.reg.total_mailbox_count(), 1002)
+        with self.assertRaisesRegex(ValueError, "capacity"):
+            self.reg.register("agent_over_limit", "overlimit")
+
+    def test_regular_agent_cannot_take_system_identity(self):
+        for agent_id in ("system_postmaster", "system_abuse"):
+            with self.subTest(agent_id=agent_id), self.assertRaises(ValueError):
+                self.reg.register(agent_id, "ordinary")
+        self.assertEqual(self.reg.mailbox_count(), 0)
 
     def test_domain_cannot_change_unintentionally(self):
         self.reg.register("agent_001", "alice")
