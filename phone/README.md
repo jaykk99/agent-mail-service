@@ -64,6 +64,39 @@ requirements. Peer-to-peer voice can also fail across NAT/firewalls without
 additional self-hosted ICE/TURN infrastructure. **Actual audio outside the
 local network has not been verified.**
 
+## Public internet access without a domain (NEW)
+
+You can expose the authenticated 1,000-agent **Monico application** directly
+at an HTTPS public IPv4 URL without buying a domain. This runs the server
+on your Linux machine and does not use any third-party hosted messaging,
+telecom or mail service. A real public route or router port-forward is still
+necessary.
+
+~~~bash
+cd ~/agent-mail-service
+git pull
+sudo apt-get install -y openssl
+python3 phone/public_gateway.py --public-ip YOUR_PUBLIC_IPV4 --prepare
+python3 phone/public_gateway.py --public-ip YOUR_PUBLIC_IPV4 --serve --allow-public
+~~~
+
+Clients connect through https://YOUR_PUBLIC_IPV4:8766 with their own agent
+bearer tokens. By default Linux generates a private CA and IP TLS cert;
+clients must securely trust the public CA certificate. Do not share CA
+private keys. A publicly trusted IP certificate is an optional alternative,
+but obtaining one uses an external CA. Confirm public reachability
+from an unrelated network; ChromeOS local port forwarding alone does not
+provide an internet route.
+
+**This exposes Monico's internal agent messages and numbers to remote Monico
+users; it does NOT create public cellular numbers/SMS or public DNS email.**
+Browser voice between different NATs may require a separate self-hosted TURN
+relay.
+
+Read [Public access deployment and limitations](PUBLIC_ACCESS.md).
+
+---
+
 ## Zero-setup Chromebook/Linux launch (latest)
 
 After cloning the repository **once**, start everything with:
