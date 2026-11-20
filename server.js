@@ -62,9 +62,16 @@ app.use(express.json({ limit: '50kb' }));
 
 const PORT = process.env.PORT || 3000;
 const SMTP_PORT = process.env.SMTP_PORT || 2525;
-const TOKEN = process.env.AGENT_MAIL_TOKEN || 'dev-token-change-me';
-if (TOKEN === 'dev-token-change-me') {
-  console.warn('[security] AGENT_MAIL_TOKEN is the default dev token — set a long random token in production!');
+// Never grant master access with a public example token or an unset value.
+function secureMasterKey(value) {
+  const token = typeof value === 'string' ? value.trim() : '';
+  if (!token || token === 'dev-token-change-me' ||
+      token === 'generate-a-long-random-token-here') return '';
+  return token;
+}
+const TOKEN = secureMasterKey(process.env.AGENT_MAIL_TOKEN);
+if (!TOKEN) {
+  console.warn('[security] AGENT_MAIL_TOKEN missing or unsafe; master and fallback inbound auth DISABLED until configured.');
 }
 // Lowercased once: every comparison below is against lowercased addresses, so
 // a MAIL_DOMAIN typed with capitals used to drop all HTTP-inbound mail.
@@ -2014,4 +2021,5 @@ module.exports = {
   createAccount,
   findAccountByKeyHash,
   dkimPublicKeyRecord,
+  secureMasterKey,
 };
