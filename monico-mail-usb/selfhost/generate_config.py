@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate REVIEW-ONLY Postfix/Dovecot 2.3 configs for an independent mail host.
+"""Generate REVIEW-ONLY Postfix/Dovecot 2.3/2.4 configs for an independent mail host.
 
 The generated files are not installed automatically. Real domain delegation,
 public reachability, PTR DNS and trusted TLS are prerequisites for public mail.
@@ -29,17 +29,25 @@ def check_path(value):
     return value
 
 
-def render(domain, db, mail_root, uid, gid, certificate, private_key, public_ip):
+def render(domain, db, mail_root, uid, gid, certificate, private_key, public_ip, public_ipv6=None):
     domain = check_domain(domain)
     db, mail_root = check_path(db), check_path(mail_root)
     certificate, private_key = check_path(certificate), check_path(private_key)
     if uid < 100 or gid < 100:
         raise ValueError("Use a dedicated non-system vmail UID and GID >= 100")
-    if ipaddress.ip_address(public_ip).version != 4:
-        raise ValueError("This starter configuration requires a public IPv4 address")
-    # Check for RFC1918, loopback and other invalid externally routable addresses.
-    if not ipaddress.ip_address(public_ip).is_global:
-        raise ValueError("A public IPv4 address is required for public mail")
+    if not public_ip and not public_ipv6:
+        raise ValueError("A globally routable public IPv4 or IPv6 address is required")
+    if public_ip is not None:
+        ip4 = ipaddress.ip_address(public_ip)
+        if ip4.version != 4 or not ip4.is_global:
+            raise ValueError("IPv4 must be globally routable")
+        public_ip = str(ip4)
+    if public_ipv6 is not None:
+        ip6 = ipaddress.ip_address(public_ipv6)
+        if ip6.version != 6 or not ip6.is_global:
+            raise ValueError("IPv6 must be globally routable")
+        public_ipv6 = str(ip6)
+    protocols = "all" if public_ip and public_ipv6 else ("ipv6" if public_ipv6 else "ipv4")
 
     postfix_main = f"""# REVIEW BEFORE INSTALLING; do not overwrite an existing production main.cf
 myhostname = mail.{domain}
@@ -47,7 +55,7 @@ mydomain = {domain}
 myorigin = $mydomain
 mydestination = localhost
 inet_interfaces = all
-inet_protocols = ipv4
+inet_protocols = {protocols}
 mynetworks = 127.0.0.0/8
 virtual_mailbox_domains = {domain}
 virtual_mailbox_maps = proxy:sqlite:/etc/postfix/sqlite-virtual-mailboxes.cf
@@ -167,11 +175,15 @@ service auth {{
 
     # DNS files deliberately have placeholders for verification of DKIM
     # rather than inventing a key and claiming deliverability.
+    addresses = "\n".join(
+        (["mail 3600 IN A " + public_ip] if public_ip else []) +
+        (["mail 3600 IN AAAA " + public_ipv6] if public_ipv6 else [])
+    )
     zone = f"""; Illustrative authoritative DNS records. A parent-zone delegation is REQUIRED.
 ; Replace domain and infrastructure details to match your delegated zone.
 $ORIGIN {domain}.
 @ 3600 IN MX 10 mail.{domain}.
-mail 3600 IN A {public_ip}
+{addresses}
 @ 3600 IN TXT "v=spf1 mx -all"
 _dmarc 3600 IN TXT "v=DMARC1; p=none"
 ; DKIM public TXT record must be added after generating and configuring a DKIM key.
@@ -198,11 +210,12 @@ def main():
     p.add_argument("--vmail-gid", type=int, required=True)
     p.add_argument("--cert", required=True, help="TLS certificate path (not created)")
     p.add_argument("--key", required=True, help="TLS private key path (not created)")
-    p.add_argument("--public-ip", required=True, help="Globally routable IPv4 address")
+    p.add_argument("--public-ip", help="Globally routable IPv4, optional with IPv6")
+    p.add_argument("--public-ipv6", help="Globally routable IPv6, optional with IPv4")
     p.add_argument("--output", default=".generated/selfhost")
     args = p.parse_args()
     configs = render(args.domain, args.db, args.mail_root, args.vmail_uid,
-                     args.vmail_gid, args.cert, args.key, args.public_ip)
+                     args.vmail_gid, args.cert, args.key, args.public_ip, args.public_ipv6)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     for name, content in configs.items():
