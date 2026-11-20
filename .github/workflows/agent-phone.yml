@@ -4,6 +4,7 @@ on:
     paths:
       - 'phone/**'
       - 'test/test_phone*.py'
+      - 'start.sh'
       - '.github/workflows/agent-phone.yml'
   push:
     paths:
@@ -21,7 +22,8 @@ jobs:
       - name: Verify on system Python (no pip installs)
         run: |
           python3 --version
-          python3 -m py_compile phone/provision.py phone/server.py phone/mcp.py phone/start.py phone/internal_mail.py
+          python3 -m py_compile phone/provision.py phone/server.py phone/mcp.py phone/start.py phone/internal_mail.py phone/usb_storage.py
+          sh -n start.sh
           python3 -m unittest discover -s test -p 'test_phone*.py' -v
       - name: Parse browser JavaScript syntax (CI only)
         run: |
