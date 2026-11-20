@@ -63,3 +63,17 @@ cd monico-mail-usb
 A permanent HTTPS URL can be configured after per-request authentication, secure agent credentials, rate limiting, and pairing are built and tested. Tailscale Funnel compatibility with Crostini must be verified. An HTTPS tunnel does not provide public SMTP/IMAP mail delivery. Public email requires a delegated domain, DNS mail records, and a functioning mail transport.
 
 Chromebooks may suspend Linux during sleep, lid closure, or system updates; 24/7 uptime is not guaranteed.
+
+## Run the automated registry tests
+
+From `agent-mail-service/monico-mail-usb`:
+
+```bash
+bash run-tests.sh
+```
+
+GitHub Actions also runs these tests on changes to this folder. These tests check persistent identity, unique email names, invalid credentials, key rotation, and missing USB directories. They **do not** validate actual SMTP delivery, remote MCP authentication, public HTTPS availability, or Chromebook uptime.
+
+## Security notes
+
+The admin key is currently passed as a tool argument and is **not suitable for exposure to remote/untrusted MCP clients**. Use the service only on the private Linux loopback interface. A production release needs authentication at the HTTP transport layer, secure onboarding, and audited mail delivery before publishing a URL.
