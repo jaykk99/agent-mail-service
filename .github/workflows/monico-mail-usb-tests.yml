@@ -1,0 +1,26 @@
+name: Monico Mail USB tests
+on:
+  push:
+    paths:
+      - 'monico-mail-usb/**'
+      - '.github/workflows/monico-mail-usb-tests.yml'
+  pull_request:
+    paths:
+      - 'monico-mail-usb/**'
+      - '.github/workflows/monico-mail-usb-tests.yml'
+  workflow_dispatch:
+jobs:
+  registry-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: monico-mail-usb
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Syntax check
+        run: python -m compileall -q monico_core.py server.py tests
+      - name: Registry unit tests
+        run: bash run-tests.sh
