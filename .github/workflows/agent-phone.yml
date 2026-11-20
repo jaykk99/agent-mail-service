@@ -108,6 +108,19 @@ jobs:
           assert not r['postfix_dovecot_verified'] and not r['public_domain_verified']
           print("Doctor separated working local services from unverified public delivery")
           PY
+          sha256sum "$TEST_STATE/monico/linux-config.json" "$TEST_STATE/monico/agents.sqlite3" > "$RUNNER_TEMP/pre-restart-hashes"
+          bash start.sh --full stop --state-dir "$TEST_STATE"
+          bash start.sh --full up --state-dir "$TEST_STATE"
+          bash start.sh --full status --state-dir "$TEST_STATE" > "$RUNNER_TEMP/restarted.json"
+          python3 - "$RUNNER_TEMP/restarted.json" <<'PY'
+          import json,sys
+          r=json.load(open(sys.argv[1]))
+          assert r['phone_online_local'] and r['mcp_online_local']
+          assert r['mailbox_count']==1
+          assert r['mailbox_domain']=='mail.example.invalid'
+          print("Restart preserved both services and self-selected mailbox identity")
+          PY
+          sha256sum -c "$RUNNER_TEMP/pre-restart-hashes"
       - name: Stop both Linux services and show process logs on failure
         if: always()
         env:
