@@ -122,6 +122,7 @@ jobs:
           assert not r['public_browser_gateway']['outside_network_verified']
           print("Doctor separated working local services from unverified public delivery")
           PY
+          bash start.sh --full release --scope local --state-dir "$TEST_STATE" > "$RUNNER_TEMP/release-cli.json"
           python3 linux/release_gate.py --scope local --state-dir "$TEST_STATE" > "$RUNNER_TEMP/release-local.json"
           python3 - "$RUNNER_TEMP/release-local.json" <<'PY'
           import json,sys
