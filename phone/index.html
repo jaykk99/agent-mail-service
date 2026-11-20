@@ -16,6 +16,10 @@
 <label>Body<textarea id="emailBody" maxlength="10000"></textarea></label>
 <button id="sendEmail">Send internal email</button><button id="refreshEmail">Refresh email inbox</button>
 <div id="emailInbox" aria-live="polite"></div></section>
+<section><h2>My WebPhone number</h2><p id="webNumber">Sign in to view.</p>
+<button id="guestLink">Create a one-time guest calling link (30 minutes)</button>
+<label>Guest link<input id="guestUrl" readonly placeholder="Private guest invitation link"></label>
+<small>Anyone holding the link can connect once, even without an agent account. For other devices, the server must have a reachable trusted HTTPS address; localhost only works on this computer.</small></section>
 <section><h2>Voice calls (WebRTC)</h2><button id="call">Call extension above</button><button id="hangup">Hang up</button><audio id="remote" autoplay playsinline controls></audio><p id="status">Idle</p><small>Calls are peer-to-peer and only work where the browsers can reach one another. The server stores signaling data, not audio.</small></section></div>
 <section><h3>Activity</h3><div id="log" aria-live="polite"></div></section>
 <script>
@@ -33,13 +37,19 @@ async function handleSignal(event){const other=event.from, kind=event.data.type,
   if(kind==='answer'&&pc&&peer===other){await pc.setRemoteDescription(value);for(const c of pendingCandidates)await pc.addIceCandidate(c);pendingCandidates=[];return}
   if(kind==='candidate'&&peer===other&&pc){if(pc.remoteDescription)await pc.addIceCandidate(value);else pendingCandidates.push(value)}
 }
-async function poll(){if(!me)return;try{const [msgs,sigs]=await Promise.all([api('/api/messages?after='+msgCursor+'&limit=100'),api('/api/signals?after='+signalCursor+'&limit=100')]);for(const event of msgs.events){msgCursor=event.id;const div=document.createElement('p');div.textContent=event.from+': '+event.data.text;el('inbox').prepend(div)}for(const event of sigs.events){signalCursor=event.id;try{await handleSignal(event)}catch(e){log('Call error: '+e.message);closeCall(false)}}}catch(e){log('Polling error: '+e.message)}}
+async function poll(){if(!me)return;try{const [msgs,sigs]=await Promise.all([api('/api/messages?after='+msgCursor+'&limit=100'),api('/api/signals?after='+signalCursor+'&limit=100')]);for(const event of msgs.events){msgCursor=event.id;const div=document.createElement('p');div.textContent=event.from+': '+event.data.text;if(event.from.startsWith('guest:')){const reply=document.createElement('button');reply.textContent='Reply to guest';reply.onclick=()=>{el('recipient').value=event.from;el('msg').focus()};div.appendChild(reply)}el('inbox').prepend(div)}for(const event of sigs.events){signalCursor=event.id;try{await handleSignal(event)}catch(e){log('Call error: '+e.message);closeCall(false)}}}catch(e){log('Polling error: '+e.message)}}
 async function loadMailboxes(){const r=await api('/api/mailboxes');el('myEmails').value=r.addresses.join('\n')}
 async function pollEmail(){const data=await api('/api/email/inbox?after='+emailCursor);for(const e of data.emails){emailCursor=e.id;const item=document.createElement('p');item.textContent='From '+e.from+' to '+e.to+' | '+e.subject+' | '+e.text;el('emailInbox').prepend(item)}}
 el('createAlias').onclick=async()=>{try{const r=await api('/api/mailboxes',{prefix:el('alias').value.trim()});log('Created internal email '+r.address);await loadMailboxes()}catch(e){log('Email alias error: '+e.message)}};
 el('sendEmail').onclick=async()=>{try{const from=el('myEmails').value.split('\n').filter(Boolean)[0];await api('/api/email/send',{from,to:el('emailTo').value.trim(),subject:el('emailSubject').value,text:el('emailBody').value});el('emailBody').value='';log('Internal email delivered')}catch(e){log('Email error: '+e.message)}};
 el('refreshEmail').onclick=()=>pollEmail().catch(e=>log('Inbox error: '+e.message));
-async function signIn(){token=el('token').value.trim()||token;if(!token){log('Enter your API token');return}try{me=await api('/api/me');const cursor=await api('/api/signals/cursor');signalCursor=cursor.cursor;sessionStorage.setItem('agentPhoneToken',token);el('login').style.display='none';el('app').style.display='block';el('identity').textContent=me.agentId+' • Extension '+me.extension;const route=await api('/api/routes');el('routeStatus').textContent='Private domain: '+route.privateWebDomain+' | Email: '+me.email+' | Internal SMS: available | Public SMS/phone: not connected';log('Signed in as '+me.extension);await loadMailboxes();await pollEmail();await poll();if(poller)clearInterval(poller);poller=setInterval(()=>{poll();pollEmail().catch(e=>log(e.message))},1100)}catch(e){log('Login failed: '+e.message);me=null;token='';sessionStorage.removeItem('agentPhoneToken')}}
+el('guestLink').onclick=async()=>{try{
+  const invite=await api('/api/webphone/invites',{ttlMinutes:30});
+  el('guestUrl').value=location.origin+invite.path;
+  log('Created one-time WebPhone guest link for '+invite.webNumber);
+}catch(e){log('Guest link error: '+e.message)}};
+
+async function signIn(){token=el('token').value.trim()||token;if(!token){log('Enter your API token');return}try{me=await api('/api/me');const cursor=await api('/api/signals/cursor');signalCursor=cursor.cursor;sessionStorage.setItem('agentPhoneToken',token);el('login').style.display='none';el('app').style.display='block';el('identity').textContent=me.agentId+' • Extension '+me.extension;el('webNumber').textContent='web:'+me.extension+' (not a carrier number)';const route=await api('/api/routes');el('routeStatus').textContent='Private domain: '+route.privateWebDomain+' | Email: '+me.email+' | Internal SMS: available | Public SMS/phone: not connected';log('Signed in as '+me.extension);await loadMailboxes();await pollEmail();await poll();if(poller)clearInterval(poller);poller=setInterval(()=>{poll();pollEmail().catch(e=>log(e.message))},1100)}catch(e){log('Login failed: '+e.message);me=null;token='';sessionStorage.removeItem('agentPhoneToken')}}
 el('signIn').onclick=signIn;
 el('logout').onclick=()=>{closeCall();clearInterval(poller);poller=null;me=null;token='';sessionStorage.removeItem('agentPhoneToken');el('app').style.display='none';el('login').style.display='block'};
 el('send').onclick=async()=>{try{await api('/api/messages',{to:el('recipient').value.trim(),text:el('msg').value});el('msg').value='';log('Message sent')}catch(e){log('Send failed: '+e.message)}};

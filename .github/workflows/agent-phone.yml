@@ -22,7 +22,7 @@ jobs:
       - name: Verify on system Python (no pip installs)
         run: |
           python3 --version
-          python3 -m py_compile phone/provision.py phone/server.py phone/mcp.py phone/start.py phone/internal_mail.py phone/usb_storage.py
+          python3 -m py_compile phone/provision.py phone/server.py phone/mcp.py phone/start.py phone/internal_mail.py phone/usb_storage.py phone/webphone.py
           sh -n start.sh
           python3 -m unittest discover -s test -p 'test_phone*.py' -v
       - name: Parse browser JavaScript syntax (CI only)
@@ -42,8 +42,12 @@ jobs:
               def handle_data(self, value):
                   if self.in_script:
                       self.scripts.append(value)
-          p = ScriptParser()
-          p.feed(Path('phone/index.html').read_text())
-          Path('/tmp/agent-phone-ui.js').write_text('\n'.join(p.scripts))
+          import subprocess
+          for idx, file in enumerate(('phone/index.html', 'phone/webphone_guest.html')):
+              p = ScriptParser()
+              p.scripts = []
+              p.feed(Path(file).read_text())
+              dest = Path(f'/tmp/agent-phone-ui-{idx}.js')
+              dest.write_text('\n'.join(p.scripts))
+              subprocess.run(['node', '--check', str(dest)], check=True)
           PY
-          node --check /tmp/agent-phone-ui.js

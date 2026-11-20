@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>WebPhone Guest Call</title>
+<style>
+:root{font-family:system-ui,-apple-system,sans-serif;color-scheme:dark;background:#0f1420;color:#f2f5ff}
+body{max-width:580px;margin:0 auto;padding:22px}
+section{border:1px solid #3c4560;background:#1a2232;border-radius:14px;padding:18px;margin:14px 0}
+button{color:#fff;border:0;border-radius:9px;padding:12px 18px;background:#326bdc;margin:5px;cursor:pointer;font:inherit}
+button:disabled{opacity:.4}textarea{width:100%;max-width:100%;box-sizing:border-box;background:#101826;border:1px solid #495270;color:#fff;padding:12px;border-radius:9px;font:inherit}
+small{color:#b1bdcd}#messages p{overflow-wrap:anywhere;border-bottom:1px solid #323d52;padding-bottom:8px}
+</style></head><body>
+<h1>WebPhone</h1><p>A private browser calling link — no telephone company, SIM, or SMS carrier required.</p>
+<section><h2>Connect to an agent</h2><p id="status">Invitation not yet opened.</p>
+<button id="connect">Connect</button><button id="call" disabled>Start voice call</button>
+<button id="hangup" disabled>Hang up</button><audio id="remote" autoplay playsinline controls></audio>
+<p><small>Calls use end-to-end browser WebRTC transport. Both browsers must be reachable over a compatible network. When accessing another device, the server must have trusted HTTPS.</small></p></section>
+<section><h2>Message the agent</h2><textarea id="message" maxlength="2000" placeholder="Type an internal message"></textarea>
+<button id="send" disabled>Send private message</button><div id="messages" aria-live="polite"></div>
+</section><p><small>Important: This is a WebPhone ID, not a real cellular number. It cannot receive ordinary carrier calls or verification SMS.</small></p>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const invitation=decodeURIComponent(location.pathname.split('/').filter(Boolean).pop()||'');
+let session=null,pc=null,stream=null,signalCursor=0,textCursor=0,pending=[],polling=false,timer=null;
+function status(text){$('status').textContent=text}
+async function request(path,body,auth=false){
+  const res=await fetch(path,{method:body===undefined?'GET':'POST',
+    headers:{...(body===undefined?{}:{'Content-Type':'application/json'}),
+      ...(auth&&session?{Authorization:'Bearer '+session.token}:{})},
+    body:body===undefined?undefined:JSON.stringify(body)});
+  const data=await res.json();
+  if(!res.ok)throw Error(data.error||'HTTP '+res.status);
+  return data;
+}
+function showText(who,text){const item=document.createElement('p');item.textContent=who+': '+text;$('messages').prepend(item)}
+function stopCall(notify=false){if(notify&&session)request('/api/webphone/guest/signal',{type:'hangup',value:null},true).catch(()=>{});if(pc){pc.close();pc=null}if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}$('remote').srcObject=null;pending=[];$('hangup').disabled=true;if(session)status('Connected to '+session.webNumber+' — voice call ended')}
+async function connect(){if(session)return;try{
+  session=await request('/api/webphone/session',{invite:invitation});
+  status('Connected to '+session.webNumber+' — guest ID '+session.sessionId);
+  $('connect').disabled=true;$('call').disabled=false;$('send').disabled=false;
+  timer=setInterval(poll,900);await poll();
+}catch(e){status('Connection failed: '+e.message)}}
+async function call(){try{
+  if(!session)throw Error('Connect first');
+  if(!navigator.mediaDevices?.getUserMedia)throw Error('Microphone requires localhost or trusted HTTPS');
+  stopCall();
+  stream=await navigator.mediaDevices.getUserMedia({audio:true});
+  pc=new RTCPeerConnection({iceServers:[]});
+  pc.ontrack=e=>{$('remote').srcObject=e.streams[0];$('remote').play().catch(()=>{})};
+  pc.onicecandidate=e=>{if(e.candidate)request('/api/webphone/guest/signal',{type:'candidate',value:e.candidate.toJSON()},true).catch(err=>status('ICE error: '+err.message))};
+  pc.onconnectionstatechange=()=>{if(pc)status('Call '+pc.connectionState)};
+  for(const track of stream.getTracks())pc.addTrack(track,stream);
+  const offer=await pc.createOffer();await pc.setLocalDescription(offer);
+  await request('/api/webphone/guest/signal',{type:'offer',value:pc.localDescription.toJSON()},true);
+  $('hangup').disabled=false;status('Calling '+session.webNumber+'…');
+}catch(e){stopCall();status('Call failed: '+e.message)}}
+async function poll(){if(!session||polling)return;polling=true;try{
+  const signals=await request('/api/webphone/guest/events?kind=signal&after='+signalCursor,undefined,true);
+  for(const event of signals.events){signalCursor=event.id;
+    const type=event.data.type,value=event.data.value;
+    if(type==='answer'&&pc){await pc.setRemoteDescription(value);for(const ice of pending)await pc.addIceCandidate(ice);pending=[]}
+    if(type==='candidate'&&pc){if(pc.remoteDescription)await pc.addIceCandidate(value);else pending.push(value)}
+    if(type==='hangup'){stopCall();status('Agent ended the call')}
+  }
+  const texts=await request('/api/webphone/guest/events?kind=text&after='+textCursor,undefined,true);
+  for(const event of texts.events){textCursor=event.id;showText('Agent',event.data.text)}
+}catch(e){status('Connection error: '+e.message);if(/expired|401/.test(e.message)){clearInterval(timer);session=null;$('call').disabled=true;$('send').disabled=true}}
+finally{polling=false}}
+$('connect').onclick=connect;
+$('call').onclick=call;
+$('hangup').onclick=()=>stopCall(true);
+$('send').onclick=async()=>{try{
+ if(!session)throw Error('Connect first');
+ const text=$('message').value;
+ await request('/api/webphone/guest/message',{text},true);
+ showText('You',text);$('message').value='';
+}catch(e){status('Message error: '+e.message)}};
+</script></body></html>

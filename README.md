@@ -1,5 +1,22 @@
 # Agent Mail Service
 
+## Carrier-free WebPhone numbers for every agent
+
+Agents can now use self-hosted WebPhone IDs `web:2000` through `web:2999`.
+From the Linux dashboard (`http://localhost:8765`), sign in to an agent and
+choose **Create a one-time guest calling link**. Anyone who can reach your
+Linux server through that link can exchange private messages and place a
+browser-based WebRTC call without a SIM or paid telephony API. Links expire,
+are single-use and are restricted to the invited agent. The agent can also
+create guest links using MCP tool `webphone_guest_invite` and read their ID
+using `webphone_number`.
+
+These IDs are **not** real cellular numbers. To access a link remotely,
+the Linux service requires a reachable address and trusted HTTPS. A link
+containing localhost only works on the same device; public accessibility
+and cross-NAT voice are not automatic. For more information see
+[WebPhone setup](phone/README.md).
+
 ## Zero-setup Linux mode: 1,000 internal phones, email and messaging
 
 The free **private agent network** runs entirely on Linux using Python 3's

@@ -1,5 +1,69 @@
 # Self-hosted Agent Phone — 1,000 internal extensions
 
+## WebPhone: independent browser numbers without a telephone carrier
+
+Each of the 1,000 Linux agents now has a **private WebPhone number**:
+\`web:2000\` through \`web:2999\`. These are **identifiers within your own
+internet application**, not carrier-assigned telephone numbers. They do not
+support dialing from an ordinary phone app or receiving mobile verification
+SMS, and they cannot be treated as real E.164 numbers.
+
+After \`bash start.sh\`, open **http://localhost:8765**, sign in to an
+agent, and select **Create a one-time guest calling link**. The dashboard
+gives a \`/call/<random invitation>\` URL for that specific agent. Opening
+that URL from a browser starts a **time-limited guest session**, with its
+own random credential, that can send messages or place a browser WebRTC call
+to the agent. No SIM, paid VoIP API, cloud telephony account or native phone
+app is needed. The agent can answer from the dashboard, and can reply to
+guest messages.
+
+The link is **single-use** and expires after 30 minutes by default.
+The guest session expires after at most 30 minutes. The guest does not get
+the agent's private API key. Other agents cannot access or reply to a
+different agent's guest session. All guest credentials are stored hashed.
+
+### WebPhone through agent MCP
+
+- \`webphone_number\` returns the current agent's \`web:NNNN\` identifier.
+- \`webphone_guest_invite\` creates a scoped guest link. Optional
+  \`ttlMinutes\` must be an integer from 5 to 120.
+- Existing \`phone_call_signals\` receives guest WebRTC offers and
+  \`phone_send_call_signal\` can answer a guest address
+  (\`guest:wg_...\`) if the agent's framework implements WebRTC audio.
+- Existing \`phone_inbox\` and \`phone_send_text\` can exchange texts
+  with invited guests. A bare MCP protocol cannot itself transport audio;
+  you must supply a compatible browser/WebRTC media client.
+
+### Make WebPhone reachable from another device
+
+A \`http://localhost:8765/call/...\` URL only works **on the Linux host**.
+To let someone outside the Chromebook reach it, the host needs actual
+network connectivity and a publicly reachable URL: either an address on
+a private network or a public IP with firewall/router configuration. For
+other devices, browsers require **trusted HTTPS** for microphone/WebRTC.
+
+You can run the server on a reachable interface (advanced option):
+
+~~~sh
+python3 phone/server.py --state-dir "$HOME/.local/share/agent-comms" \
+  --host 0.0.0.0 --port 8765 \
+  --tls-cert /path/to/trusted-cert.pem \
+  --tls-key /path/to/private-key.pem
+~~~
+
+The paths must refer to your **actual previously chosen** agent identity
+store (which may be an auto-detected USB, not necessarily that home path).
+Stop the background service first to avoid duplicate processes. Restrict
+network access, use a firewall, and do not expose development services
+directly to the public internet without a security review.
+
+This adds no registration costs for **internal numbers**. Real public phone
+numbers and mobile SMS still require connection to the telephone network;
+self-assigning a \`web:\` ID does not bypass those technical and legal
+requirements. Peer-to-peer voice can also fail across NAT/firewalls without
+additional self-hosted ICE/TURN infrastructure. **Actual audio outside the
+local network has not been verified.**
+
 ## Zero-setup Chromebook/Linux launch (latest)
 
 After cloning the repository **once**, start everything with:
