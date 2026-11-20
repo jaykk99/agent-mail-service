@@ -127,12 +127,14 @@ the historical Node backend's public `/health` endpoint from an unrelated
 GitHub-hosted Linux runner, using normal HTTPS certificate validation and
 no authentication secrets.
 
-**Observed result:** HTTP **503 Service Unavailable** on **three attempts**.
-The historical hosted Node API did **not** pass public availability
-verification in this run. This is a point-in-time observation, not proof
+**Observed result:** HTTP **503 Service Unavailable** on **three attempts**
+in the initial run, and on **all seven attempts over about 90 seconds** in a
+second independent test. The historical hosted Node API did **not** pass
+public availability verification in either run. This is a point-in-time observation, not proof
 that it can never recover or that a different Monico Linux host is offline.
 
 - [External Linux probe run and response codes](https://github.com/jaykk99/agent-mail-service/actions/runs/44799802062)
+- [Longer outside-network retry (7 HTTP 503 responses)](https://github.com/jaykk99/agent-mail-service/actions/runs/44800134122)
 - [The exact probe source](linux/probe_legacy_public.py)
 - [The independently runnable check](.github/workflows/monico-historical-public-check.yml)
 
