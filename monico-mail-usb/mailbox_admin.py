@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from getpass import getpass
 from monico_core import Registry
+from mailbox_claims import MailboxClaims
 
 
 def main():
@@ -16,6 +17,11 @@ def main():
     create.add_argument("agent_id")
     create.add_argument("name", help="Requested unique local part before the @")
     sub.add_parser("count", help="Count independent registered mailboxes")
+    issue = sub.add_parser("issue-invites", help="Create one-use signup invitations for agents")
+    issue.add_argument("--count", type=int, default=1, help="1-200 invites per batch")
+    issue.add_argument("--valid-days", type=int, default=7, help="Expires in 1-30 days")
+    claim = sub.add_parser("claim", help="Agent selects its own email name using an invite")
+    claim.add_argument("name", help="Example: research (not a preassigned agent number)")
     rotate = sub.add_parser("rotate-password", help="Rotate an agent's IMAP/SMTP password")
     rotate.add_argument("agent_id")
     args = parser.parse_args()
@@ -26,9 +32,15 @@ def main():
     if not Path(root).is_dir():
         parser.error("USB data directory not found; refusing to proceed")
     registry = Registry(root, domain)
+    claims = MailboxClaims(registry, capacity=int(os.environ.get("MONICO_MAX_MAILBOXES", "1000")))
     try:
         if args.command == "create":
             result = registry.register(args.agent_id, args.name)
+        elif args.command == "issue-invites":
+            result = claims.issue_invites(args.count, args.valid_days)
+        elif args.command == "claim":
+            code = getpass("One-time invitation code (hidden): ")
+            result = claims.claim(code, args.name)
         elif args.command == "rotate-password":
             token = getpass("Agent MCP token (hidden): ")
             result = registry.rotate_mail_password(args.agent_id, token)
