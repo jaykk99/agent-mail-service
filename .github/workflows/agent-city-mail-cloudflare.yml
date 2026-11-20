@@ -1,0 +1,29 @@
+name: Agent City Mail Cloudflare build and security tests
+on:
+  pull_request:
+    paths:
+      - 'cloudflare/agent-city-mail/**'
+      - '.github/workflows/agent-city-mail-cloudflare.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'cloudflare/agent-city-mail/**'
+      - '.github/workflows/agent-city-mail-cloudflare.yml'
+  workflow_dispatch:
+jobs:
+  cloudflare-mail:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        working-directory: cloudflare/agent-city-mail
+        run: npm install --no-audit --no-fund
+      - name: Run backend authorization and mailbox tests
+        working-directory: cloudflare/agent-city-mail
+        run: npm test
+      - name: Build Cloudflare Worker without deploying
+        working-directory: cloudflare/agent-city-mail
+        run: npx wrangler deploy --dry-run --outdir ../../mail-worker-preview

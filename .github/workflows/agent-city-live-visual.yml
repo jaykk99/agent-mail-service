@@ -1,0 +1,27 @@
+name: Live Agent City desktop and mobile visual smoke test
+on:
+  pull_request:
+    paths:
+      - 'scripts/play-agent-city-live.mjs'
+      - '.github/workflows/agent-city-live-visual.yml'
+  workflow_dispatch:
+jobs:
+  live-chromium:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-save playwright@1.65.1
+      - run: npx playwright install --with-deps chromium
+      - name: Actually open and interact with deployed Agent City
+        run: node scripts/play-agent-city-live.mjs
+      - name: Save desktop and mobile screenshots and browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-city-live-chromium-screenshots
+          path: live-gameplay-artifacts/
+          if-no-files-found: ignore
