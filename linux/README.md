@@ -107,6 +107,68 @@ databases. Make encrypted backups to another Linux filesystem, protecting
 the secrets and not logging them. Don't store the mailbox secrets in a
 public repository.
 
+## Local release gate — graduate from development tests
+
+After both services are running, verify the **actual Linux process state**
+instead of assuming tests mean the host is ready:
+
+~~~bash
+bash start.sh --full release --scope local
+~~~
+
+The release gate checks: all 1,000 private agent identities, protected
+operator credentials, SQLite integrity for both communication databases,
+at least 50 MiB free on the selected Linux/USB storage volume, the real
+phone and MCP processes, and that the MCP refuses requests without
+authentication. A successful report has `"ready": true` for
+`"scope": "local"` and exits with code 0.
+
+You can also request the **entire production** checklist:
+
+~~~bash
+bash start.sh --full release --scope all
+~~~
+
+This deliberately fails until outside-network HTTPS, delegated public
+email/SMTP, and actual carrier phone routing have been verified. No
+internal unit test can substitute for those live external dependencies.
+Passing the *local* release gate does not turn a local inbox into a
+working `@public-domain` address or allocate mobile telephone numbers.
+
+## Optional automatic restart on real Linux
+
+To keep the local services running after Linux login or a process crash,
+first install dependencies and pass the local release gate. Then:
+
+~~~bash
+# Review the unit before writing any systemd configuration
+python3 linux/autostart.py --dry-run
+
+# Write an owner-only non-root user service and start it:
+python3 linux/autostart.py --enable
+
+# Inspect it using Linux's own service manager:
+systemctl --user status monico-agent.service
+journalctl --user -u monico-agent.service -n 50
+~~~
+
+For a fixed USB-backed path, pass `--state-dir "/your/USB/path"` to
+both the initial install and the autostart script. A missing USB will
+**not** cause Monico to generate replacement identities. For public
+HTTPS autostart, the installer additionally requires both your actual
+`--public-ip` and `--allow-public`; it will not automatically expose
+services without your opt-in.
+
+If your host does not run `systemd --user`, the autostart operation
+reports an error; local startup remains available through `start.sh`.
+A login-bound user systemd manager may stop at logout. True pre-login
+autostart requires separately enabling systemd lingering on a native
+Linux host, according to local OS policy. **Chromebook Crostini can
+suspend or stop independently of any Linux watchdog.** Nothing in this
+unit enables carrier SMS, public SMTP, or trusted public DNS.
+
+---
+
 ## Optional: Start your own public HTTPS browser gateway
 
 This exposes **only the Monico browser messenger, private extensions, and
