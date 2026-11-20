@@ -105,6 +105,25 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.reg.provision_system_mailbox("root")
 
+    def test_sqlite_handle_closed_after_context_and_rollback(self):
+        import sqlite3
+        with self.reg.connect() as connection:
+            connection.execute("SELECT COUNT(*) FROM agents").fetchone()
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
+        try:
+            with self.reg.connect() as connection:
+                connection.execute("INSERT INTO agents(agent_id,email,token_hash,created) VALUES (?,?,?,?)",
+                                   ("rollback_agent", "rollback@mail.example.invalid", "deadbeef", 0))
+                raise RuntimeError("expected rollback")
+        except RuntimeError:
+            pass
+        with self.reg.connect() as connection:
+            row = connection.execute("SELECT 1 FROM agents WHERE agent_id='rollback_agent'").fetchone()
+        self.assertIsNone(row)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
+
     def test_missing_usb(self):
         with self.assertRaises(RuntimeError):
             Registry(self.tmp.name + "/missing", "example.invalid")
