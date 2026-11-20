@@ -34,11 +34,14 @@ for(const config of configs){
     await page.screenshot({path:'live-gameplay-artifacts/'+config.name+'-entry.png',fullPage:false});
     let enterAttempted=false,entered=false,phoneOpened=false,computerOpened=false;
     const entryBtn=page.getByRole('button',{name:/enter.*city|enter.*world|start.*game|play/i}).first();
-    if(await entryBtn.count()){
+    const legacyGate=page.getByText(/(?:Click|Tap) anywhere to step inside/i).first();
+    if(await entryBtn.count() || await legacyGate.count()){
       enterAttempted=true;
-      await entryBtn.click({timeout:12000}).catch(e=>errors.push('enter: '+String(e.message).slice(0,150)));
-      await page.waitForTimeout(2000);
-      entered=await page.locator('canvas').count()>0;
+      if(await entryBtn.count())await entryBtn.click({timeout:12000}).catch(e=>errors.push('enter: '+String(e.message).slice(0,150)));
+      else await legacyGate.click({timeout:12000}).catch(e=>errors.push('legacy gate: '+String(e.message).slice(0,150)));
+      await page.waitForTimeout(2500);
+      entered=(await page.getByText(/(?:Click|Tap) anywhere to step inside/i).count())===0 &&
+        (await page.locator('canvas').count())>0;
       await page.screenshot({path:'live-gameplay-artifacts/'+config.name+'-world.png'});
     }
     const computer=page.getByRole('button',{name:/open browserbro city computer/i}).first();
@@ -56,7 +59,8 @@ for(const config of configs){
       await page.screenshot({path:'live-gameplay-artifacts/'+config.name+'-phone.png'});
     }
     results.push({device:config.name,first,enterAttempted,entered,
-      computerOpened,phoneOpened,errors,passed:first.status===200&&first.canvas>0});
+      computerOpened,phoneOpened,errors,
+      passed:first.status===200&&first.canvas>0&&enterAttempted&&entered&&phoneOpened});
     await context.close();
   }catch(error){
     results.push({device:config.name,passed:false,error:String(error).slice(0,700),errors});
