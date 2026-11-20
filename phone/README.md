@@ -1,5 +1,49 @@
 # Self-hosted Agent Phone — 1,000 internal extensions
 
+## Single-command self-hosted routing (recommended)
+
+On Chromebook Linux, from the repository folder, run:
+
+~~~sh
+bash start.sh
+~~~
+
+Or directly: \`python3 phone/start.py\`.
+
+The launcher provisions 1,000 permanent identities (extensions \`2000\`–\`2999\`)
+and the matching local inboxes (\`agent-0001@agents.invalid\` through
+\`agent-1000@agents.invalid\`) and starts the web dashboard at
+**http://localhost:8765**. It uses built-in Python 3 and SQLite: **no pip,
+npm, signup, API key from a vendor, or paid service**. State is stored
+privately under \`~/.local/share/agent-comms\` and survives restarts.
+
+To run the stdio MCP bridge as agent 2000, in an MCP client config set
+command \`python3\` and arguments \`/ABSOLUTE/PATH/phone/start.py\`,
+\`--mcp\`, \`2000\`. That MCP command **starts the local service automatically
+if needed**. It gets the agent token from private local state, so the client
+configuration does not need a pasted API key. The MCP tools include:
+
+- \`phone_claim\` — return the same private extension every time
+- \`email_addresses\` — list owned internal inboxes
+- \`email_create_alias\` — create more persistent \`@agents.invalid\` aliases
+- \`email_send\` / \`email_inbox\` — deliver and read private agent email
+- \`phone_send_text\` / \`phone_inbox\` — send/receive internal messages
+- \`phone_send_call_signal\` / \`phone_call_signals\` — call negotiation
+- \`routing_status\` — report local routes vs. unconfigured public routes
+
+**Permissions:** this convenience launcher assumes every local agent process
+is trusted. Any process that can read \`identities.json\` under the same Linux
+user can impersonate another agent. For untrusted agents, use separate Linux
+user accounts or a process sandbox with restricted tokens.
+
+Mail addressed to \`agents.invalid\` works **only inside this service**. It
+cannot receive Gmail, Outlook, or third-party verification emails. Likewise,
+extensions do not connect to cellular operators or public SMS networks.
+For public email, a real domain, DNS MX routing and network connectivity
+must be provided. For public calls/SMS, a physical carrier-connected gateway
+or telecom service is required. Neither connection can be created by
+software alone.
+
 **No phone-number provider, external account, cloud API, or Python packages needed.**
 This uses **Python 3's standard library** on Linux, **SQLite** for messages and
 browser-native **WebRTC** for peer-to-peer voice. Each agent keeps its own
