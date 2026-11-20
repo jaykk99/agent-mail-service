@@ -23,7 +23,6 @@ import socket
 import subprocess
 import sys
 import time
-from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 PHONE = ROOT / "phone"
@@ -130,12 +129,7 @@ def _port_open(port):
 
 
 def mcp_status(folder):
-    file = _mcp_pid_path(folder)
-    try:
-        pid = int(file.read_text(encoding="utf-8").strip())
-    except (ValueError, OSError):
-        return False
-    return _pid_active(pid, MAIL / "server.py") and _port_open(MCP_PORT)
+    return inspect_mcp(folder)
 
 
 def _mcp_python():
@@ -169,6 +163,11 @@ def install():
 def start_mcp(config, folder):
     if mcp_status(folder):
         return "already running"
+    # Clear only stale PID metadata, never an actively running server.
+    pid_file = _mcp_pid_path(folder)
+    old_pid = _read_saved_mcp_pid(folder)
+    if pid_file.exists() and not (old_pid and _pid_active(old_pid, MAIL / "server.py")):
+        pid_file.unlink()
     if _port_open(MCP_PORT):
         raise RuntimeError("127.0.0.1:8787 is occupied by another process; refusing to attach")
     if not dependency_ready():
