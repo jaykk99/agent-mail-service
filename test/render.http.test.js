@@ -83,6 +83,7 @@ async function main() {
     const readiness = await readinessResponse.json();
     assert.equal(readiness.ok, false);
     assert.ok(readiness.issues.includes('persistent_storage_not_configured'));
+    assert.ok(readiness.issues.includes('public_mail_domain_not_configured'));
     assert.equal(readiness.internetEmailDeliveryVerified, false);
     console.log('PASS: real Node HTTP startup and fail-closed persistence readiness');
 
