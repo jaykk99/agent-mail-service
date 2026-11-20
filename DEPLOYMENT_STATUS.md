@@ -29,12 +29,16 @@ SMTP/LMTP/IMAP integration, not a mock.
 
 ## Expanded real-mail validation (three independently named agents)
 
-The separate [real multi-agent Linux test](https://github.com/jaykk99/agent-mail-service/actions/runs/44795517447)
+The [expanded real agent mail test](https://github.com/jaykk99/agent-mail-service/actions/runs/44796213179)
 ran actual Ubuntu Postfix/Dovecot processes, not mocks. It verified
 three independent mailbox logins over TLS, cross-agent SMTP delivery into
 real IMAP inboxes, inbox isolation, blocked unauthorized SMTP, blocked
 wrong passwords, blocked sender impersonation and immediate password
-revocation after rotation. No outside mailbox provider was used.
+revocation after rotation. No outside mailbox provider was used. The latest successful run also
+called Monico's own production `SelfHostedMail.send`, `inbox`, `read`
+and `sent` methods against those running services, and verified
+agent-token crossover is rejected. This exercises the application's
+actual SMTP/IMAP integration, not just raw test-library clients.
 
 These tests establish **real local Linux SMTP/LMTP/IMAP functionality**.
 They do not prove public email to another domain, 1,000 simultaneous active
