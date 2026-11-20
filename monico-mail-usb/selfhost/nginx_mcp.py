@@ -29,12 +29,14 @@ limit_req_zone $binary_remote_addr zone=monico_mcp:10m rate={requests_per_second
 
 server {{
     listen 80;
+    listen [::]:80;
     server_name {hostname};
     return 301 https://$host$request_uri;
 }}
 
 server {{
     listen 443 ssl;
+    listen [::]:443 ssl;
     server_name {hostname};
     ssl_certificate {certificate};
     ssl_certificate_key {private_key};
