@@ -1,8 +1,9 @@
-"""Private-only Monico MCP prototype. Do not publish without transport authentication."""
+"""Monico MCP prototype with HTTP bearer authentication; mail transport not implemented."""
 import hmac
 import os
 from pathlib import Path
 from fastmcp import FastMCP
+from fastmcp.server.auth import StaticTokenVerifier
 from monico_core import Registry
 
 ADMIN_KEY = os.environ.get("MONICO_ADMIN_KEY")
@@ -11,7 +12,15 @@ if not ADMIN_KEY or len(ADMIN_KEY) < 32:
 DATA = Path(os.environ.get("MONICO_DATA", "/mnt/monico"))
 DOMAIN = os.environ.get("MONICO_DOMAIN", "mail.example.invalid")
 registry = Registry(DATA, DOMAIN)
-mcp = FastMCP("Monico Mail")
+# Transport-level protection is mandatory even on localhost. Use a separate
+# secret from the admin provisioning key, and never commit either secret.
+MCP_BEARER_TOKEN = os.environ.get("MONICO_MCP_BEARER_TOKEN")
+if not MCP_BEARER_TOKEN or len(MCP_BEARER_TOKEN) < 32:
+    raise RuntimeError("Set MONICO_MCP_BEARER_TOKEN to a random secret of at least 32 characters")
+auth = StaticTokenVerifier(tokens={
+    MCP_BEARER_TOKEN: {"sub": "monico-operator", "client_id": "monico-operator"}
+})
+mcp = FastMCP("Monico Mail", auth=auth)
 
 @mcp.tool()
 def register_agent(admin_key: str, agent_id: str, desired_name: str) -> dict:
