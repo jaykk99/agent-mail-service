@@ -5,9 +5,22 @@ import json
 import os
 import sys
 from pathlib import Path
+import shlex
 from getpass import getpass
 from monico_core import Registry
 from mailbox_claims import MailboxClaims
+
+
+def _private_setting(filename, key):
+    """Read one whitelisted setting from our generated config without executing shell."""
+    path = Path.home() / ".config" / "monico-mail" / filename
+    if not path.is_file():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        fields = shlex.split(line)
+        if len(fields) == 2 and fields[0] == "export" and fields[1].startswith(key + "="):
+            return fields[1].split("=", 1)[1]
+    return None
 
 
 def main():
@@ -17,6 +30,7 @@ def main():
     create.add_argument("agent_id")
     create.add_argument("name", help="Requested unique local part before the @")
     sub.add_parser("count", help="Count independent registered mailboxes")
+    sub.add_parser("status", help="Show chosen domain and available mailbox slots")
     issue = sub.add_parser("issue-invites", help="Create one-use signup invitations for agents")
     issue.add_argument("--count", type=int, default=1, help="1-200 invites per batch")
     issue.add_argument("--valid-days", type=int, default=7, help="Expires in 1-30 days")
@@ -25,8 +39,8 @@ def main():
     rotate = sub.add_parser("rotate-password", help="Rotate an agent's IMAP/SMTP password")
     rotate.add_argument("agent_id")
     args = parser.parse_args()
-    root = os.environ.get("MONICO_DATA")
-    domain = os.environ.get("MONICO_DOMAIN")
+    root = os.environ.get("MONICO_DATA") or _private_setting("storage.env", "MONICO_DATA")
+    domain = os.environ.get("MONICO_DOMAIN") or _private_setting("domain.env", "MONICO_DOMAIN")
     if not root or not domain:
         parser.error("Set MONICO_DATA to the USB directory and MONICO_DOMAIN to your delegated domain")
     if not Path(root).is_dir():
@@ -35,6 +49,8 @@ def main():
     claims = MailboxClaims(registry, capacity=int(os.environ.get("MONICO_MAX_MAILBOXES", "1000")))
     try:
         if args.command == "create":
+            if claims.slots()["unreserved_slots"] < 1:
+                raise ValueError("The configured mailbox limit or pending invites reserve all slots")
             result = registry.register(args.agent_id, args.name)
         elif args.command == "issue-invites":
             result = claims.issue_invites(args.count, args.valid_days)
@@ -44,8 +60,10 @@ def main():
         elif args.command == "rotate-password":
             token = getpass("Agent MCP token (hidden): ")
             result = registry.rotate_mail_password(args.agent_id, token)
+        elif args.command == "status":
+            result = claims.slots()
         else:
-            result = {"mailboxes": registry.mailbox_count()}
+            result = {"mailboxes": registry.mailbox_count(), "domain": registry.domain}
     except ValueError as exc:
         parser.error(str(exc))
     print(json.dumps(result, indent=2))
