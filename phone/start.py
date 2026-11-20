@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """One-command private communications on Linux for up to 1,000 AI agents.
 
-  bash start.sh                      # dashboard + local routes (foreground)
+  bash start.sh                      # dashboard + local routes, stays running
+  bash start.sh --status             # check existing Linux service
+  bash start.sh --stop               # stop saved Linux service
   bash start.sh --list-usb           # find every likely removable volume
   bash start.sh --mcp 2000           # auto-start daemon + scoped MCP stdio
   bash start.sh --mcp agent-0002     # use a different persistent identity
@@ -138,6 +140,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", help="Optional manually chosen Linux storage; default detects USB")
     parser.add_argument("--list-usb", action="store_true", help="List available USB mounts and whether private credentials are safe")
+    parser.add_argument("--daemon", action="store_true", help="Start in background and return to terminal")
+    parser.add_argument("--status", action="store_true", help="Display whether local agent routing is alive")
+    parser.add_argument("--stop", action="store_true", help="Stop this installation's background server")
     parser.add_argument("--mcp", metavar="AGENT", help="Connect this agent to MCP, starting the background server if necessary")
     parser.add_argument("--serve", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, default=8765)
@@ -159,6 +164,28 @@ def main():
             print("Available USB paths: " + ", ".join(map(str, storage.usbs)), flush=True)
     try:
         live = verify_server(url, state)
+        if args.status:
+            print("Agent Communications: " + ("running" if live else "stopped"))
+            print(f"Local URL: {url}")
+            print(f"Private domain (if resolvable): http://{LOCAL_DOMAIN}:{args.port}")
+            print(f"Storage: {state} ({storage.source})")
+            print("Public email/SMS/telephone: NOT CONNECTED")
+            return
+        if args.stop:
+            if not live:
+                print("Agent Communications is not running.")
+                return
+            pid_path = state / "server.pid"
+            if not pid_path.exists():
+                raise RuntimeError("Cannot identify server PID safely; not stopping another process")
+            try:
+                pid = int(pid_path.read_text().strip())
+            except ValueError:
+                raise RuntimeError("Invalid stored server PID")
+            import signal
+            os.kill(pid, signal.SIGTERM)
+            print(f"Sent shutdown signal to agent server PID {pid}")
+            return
         if args.mcp:
             if not live:
                 spawn_daemon(state, args.port, url)
@@ -172,6 +199,12 @@ def main():
                 print(f"Agent Communications already running at {url}")
             else:
                 raise RuntimeError(f"Another agent server already listens at {url}")
+        elif args.daemon:
+            spawn_daemon(state, args.port, url)
+            print(f"Agent Communications running in background at {url}")
+            print(f"Private domain (if resolvable): http://{LOCAL_DOMAIN}:{args.port}")
+            print(f"Storage: {state} ({storage.source})")
+            print("1,000 internal phone extensions and email inboxes ready. Public SMS and internet email are not connected.")
         else:
             serve_foreground(state, url, args.port, background=args.serve)
     except (RuntimeError, ValueError, KeyError, OSError) as exc:
