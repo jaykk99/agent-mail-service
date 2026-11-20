@@ -29,7 +29,7 @@ jobs:
       - name: Verify on system Python (no pip installs)
         run: |
           python3 --version
-          python3 -m py_compile phone/provision.py phone/server.py phone/mcp.py phone/start.py phone/internal_mail.py phone/usb_storage.py phone/webphone.py linux/manage.py
+          python3 -m py_compile phone/provision.py phone/server.py phone/mcp.py phone/start.py phone/internal_mail.py phone/usb_storage.py phone/webphone.py phone/probe_public.py linux/manage.py linux/public_manage.py
           sh -n start.sh
           bash -n linux/install.sh
           python3 -m unittest discover -s test -p 'test_phone*.py' -v
@@ -100,12 +100,26 @@ jobs:
           assert reg.mailbox_count() == 1
           print('Self-selected account and secrets persisted successfully')
           PY
+          # This is a CI-only certificate test identity, NOT an owned public IP.
+          # Check full-stack opt-in HTTPS startup via localhost using the same identity store.
+          bash start.sh --full up --state-dir "$TEST_STATE" --public-ip 8.8.8.8 --allow-public > "$RUNNER_TEMP/public-start.json"
+          python3 - "$RUNNER_TEMP/public-start.json" <<'PY'
+          import json,sys
+          data=json.load(open(sys.argv[1]))
+          gateway=data['public_browser_gateway']
+          assert gateway['local_https_running']
+          assert gateway['outside_network_verified'] is False
+          assert data['mail_accounts']==1
+          print("Three local Linux services healthy; internet access still unverified")
+          PY
           bash start.sh --full doctor --state-dir "$TEST_STATE" > "$RUNNER_TEMP/monico-doctor.json"
           python3 - "$RUNNER_TEMP/monico-doctor.json" <<'PY'
           import json,sys
           r=json.load(open(sys.argv[1]))
           assert r['fastmcp_installed'] and r['mailbox_count']==1
           assert not r['postfix_dovecot_verified'] and not r['public_domain_verified']
+          assert r['public_browser_gateway']['local_https_running']
+          assert not r['public_browser_gateway']['outside_network_verified']
           print("Doctor separated working local services from unverified public delivery")
           PY
           sha256sum "$TEST_STATE/monico/linux-config.json" "$TEST_STATE/monico/agents.sqlite3" > "$RUNNER_TEMP/pre-restart-hashes"
