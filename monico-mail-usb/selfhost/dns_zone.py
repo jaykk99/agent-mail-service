@@ -42,11 +42,26 @@ def read_opendkim_public_txt(path):
     return match.group(1)
 
 
-def zone_text(domain, mail_ip, ns1_ip, ns2_ip, dkim_key=None, serial=None):
+def public_ipv6(value):
+    addr = ipaddress.ip_address(value)
+    if addr.version != 6 or not addr.is_global:
+        raise ValueError("Use a globally routable public IPv6 address, not a link-local or ULA address")
+    return str(addr)
+
+
+def zone_text(domain, mail_ip, ns1_ip, ns2_ip, dkim_key=None, serial=None,
+              mail_ipv6=None, ns1_ipv6=None, ns2_ipv6=None):
     domain = check_domain(domain)
-    mail_ip = public_ipv4(mail_ip)
-    ns1_ip = public_ipv4(ns1_ip)
-    ns2_ip = public_ipv4(ns2_ip)
+    mail_ip = public_ipv4(mail_ip) if mail_ip else None
+    ns1_ip = public_ipv4(ns1_ip) if ns1_ip else None
+    ns2_ip = public_ipv4(ns2_ip) if ns2_ip else None
+    mail_ipv6 = public_ipv6(mail_ipv6) if mail_ipv6 else None
+    ns1_ipv6 = public_ipv6(ns1_ipv6) if ns1_ipv6 else None
+    ns2_ipv6 = public_ipv6(ns2_ipv6) if ns2_ipv6 else None
+    if not mail_ip and not mail_ipv6:
+        raise ValueError("Mail host requires a public IPv4 or IPv6 address")
+    if not (ns1_ip or ns1_ipv6) or not (ns2_ip or ns2_ipv6):
+        raise ValueError("Each authoritative nameserver needs a public IPv4 or IPv6 address")
     if dkim_key is not None and not _DKIM_KEY.fullmatch(dkim_key):
         raise ValueError("DKIM key must contain only base64 public-key characters")
     serial = serial if serial is not None else int(
@@ -54,6 +69,18 @@ def zone_text(domain, mail_ip, ns1_ip, ns2_ip, dkim_key=None, serial=None):
     )
     if not isinstance(serial, int) or not 2020010100 <= serial <= 9999123199:
         raise ValueError("SOA serial must be a ten-digit increasing YYYYMMDDNN number")
+
+    host_addresses = []
+    for name, address4, address6 in (
+        ("ns1", ns1_ip, ns1_ipv6),
+        ("ns2", ns2_ip, ns2_ipv6),
+        ("mail", mail_ip, mail_ipv6),
+        ("mcp", mail_ip, mail_ipv6),
+    ):
+        if address4:
+            host_addresses.append(f"{name:<7}IN A  {address4}")
+        if address6:
+            host_addresses.append(f"{name:<7}IN AAAA  {address6}")
 
     lines = [
         "$TTL 3600",
@@ -67,10 +94,7 @@ def zone_text(domain, mail_ip, ns1_ip, ns2_ip, dkim_key=None, serial=None):
         ")",
         f"@      IN NS ns1.{domain}.",
         f"@      IN NS ns2.{domain}.",
-        f"ns1    IN A  {ns1_ip}",
-        f"ns2    IN A  {ns2_ip}",
-        f"mail   IN A  {mail_ip}",
-        f"mcp    IN A  {mail_ip}",
+        *host_addresses,
         f"@      IN MX 10 mail.{domain}.",
         '@      IN TXT "v=spf1 mx -all"',
         '_dmarc IN TXT "v=DMARC1; p=none; adkim=s; aspf=s"',
@@ -102,9 +126,12 @@ def named_config(domain, zone_file):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--domain", required=True)
-    parser.add_argument("--public-ip", required=True, help="Mail A record public IPv4")
-    parser.add_argument("--ns1-ip", required=True, help="Public IPv4 for authoritative ns1")
-    parser.add_argument("--ns2-ip", required=True, help="Public IPv4 for authoritative ns2")
+    parser.add_argument("--public-ip", help="Mail A record public IPv4 (optional with IPv6)")
+    parser.add_argument("--public-ipv6", help="Mail AAAA record public IPv6")
+    parser.add_argument("--ns1-ip", help="A record for authoritative ns1")
+    parser.add_argument("--ns2-ip", help="A record for authoritative ns2")
+    parser.add_argument("--ns1-ipv6", help="AAAA record for authoritative ns1")
+    parser.add_argument("--ns2-ipv6", help="AAAA record for authoritative ns2")
     dkim = parser.add_mutually_exclusive_group()
     dkim.add_argument("--dkim-public-key", help="Public base64 DKIM p= key (never private key)")
     dkim.add_argument("--dkim-txt-file", help="Read the public OpenDKIM mail.txt record safely")
@@ -119,14 +146,16 @@ def main():
     dkim_key = (read_opendkim_public_txt(args.dkim_txt_file)
                 if args.dkim_txt_file else args.dkim_public_key)
     zone = zone_text(domain, args.public_ip, args.ns1_ip, args.ns2_ip,
-                     dkim_key)
+                     dkim_key, mail_ipv6=args.public_ipv6,
+                     ns1_ipv6=args.ns1_ipv6, ns2_ipv6=args.ns2_ipv6)
     zone_path.write_text(zone, encoding="utf-8")
     conf_path.write_text(named_config(domain, zone_path), encoding="utf-8")
     os.chmod(zone_path, 0o600)
     os.chmod(conf_path, 0o600)
     print(f"BIND zone (not installed): {zone_path}")
     print(f"BIND config (not installed): {conf_path}")
-    if args.ns1_ip == args.ns2_ip:
+    if ((args.ns1_ip and args.ns1_ip == args.ns2_ip)
+            or (args.ns1_ipv6 and args.ns1_ipv6 == args.ns2_ipv6)):
         print("WARNING: Both nameservers share one IP. That is a single point of failure.")
     print("Check: named-checkzone " + domain + " " + str(zone_path))
     print("Public email still requires parent NS delegation/glue, PTR, and a reachable public TCP/25 server.")
