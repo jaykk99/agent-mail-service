@@ -67,7 +67,7 @@ ones get a 400, and another account's address answers 404.
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/health` | `{ ok, domain, storage, addresses, relay, webhook, addressTtlHours, retentionDays, deadLetters, retryQueue }` (no auth) |
+| GET | `/health` | `{ ok, domain, storage, addresses, relay, outbound, outboundConfigured, webhook, addressTtlHours, retentionDays, deadLetters, retryQueue }` (no auth) |
 | POST | `/api/accounts` | free signup: `{ name? }` -> `{ account, apiKey }` (key shown once) |
 | GET | `/api/me` | caller identity + usage (account key, or master summary) |
 | GET | `/api/accounts` | every account with usage counts (master only) |
@@ -75,7 +75,7 @@ ones get a 400, and another account's address answers 404.
 | POST | `/api/inbound` | Worker delivery only: `{ to, from, subject, text, html, messageId?, date? }` -> `{ ok, stored, id?, duplicate? }` (Bearer inbound secret) |
 | POST | `/api/addresses` | `{ prefix }` -> `{ address }` (rate limited, prefix max 64 chars) |
 | GET | `/api/addresses` | known addresses with inbox counts + created/last-seen |
-| POST | `/api/send` | `{ from, to, subject, text, html? }` -> `{ messageId }` (From must be an address this service created; sent via the SMTP relay) |
+| POST | `/api/send` | `{ from, fromName?, to, subject, text, html? }` -> `{ messageId, provider }` (From must be an address this service created; sent via the SMTP relay or a Resend/Brevo API key) |
 | GET | `/api/inbox/:address` | paginated, searchable email list (see below) |
 | GET | `/api/inbox/:address/:id` | full email (subject, body, links, attachment metadata) |
 | GET | `/api/wait/:address?since=&from=&timeoutMs=` | **one call does it all**: waits for the next email and returns it in full with `code` (best one-time code), `link` (best action link), `email.codes`, `email.bestLinks` |
@@ -211,15 +211,74 @@ to send. Without it everything is in memory and lost on restart.
   Delivery is fire-and-forget with a configurable timeout
   (`INCOMING_WEBHOOK_TIMEOUT_MS`); failures are logged, never retried, and
   never block SMTP acceptance.
-- **Outbound send** (`POST /api/send`, `{ from, to, subject, text, html? }`):
-  an agent sends mail from its own address through the SMTP relay
-  (`SMTP_RELAY_HOST/PORT/USER/PASS`). The `from` address must have been
-  created by this service — foreign From values get 403, so the service
-  can never send mail as someone else. Sends are rate-limited per From
-  address (`SEND_MAX_PER_HOUR`, default 100). Relay unconfigured -> 503,
-  relay failure -> 502. Relay config is validated at boot and reported in
-  `/health` as `unconfigured`, `configured`, or `misconfigured`
-  (misconfig prints loud warnings).
+- **Outbound send** (`POST /api/send`,
+  `{ from, fromName?, to, subject, text, html? }`): an agent sends mail from
+  its own address through either the SMTP relay (`SMTP_RELAY_*`) or a
+  provider HTTP API (`OUTBOUND_PROVIDER=resend|brevo`). The `from` address
+  must have been created by this service — foreign From values get 403, so
+  the service can never send mail as someone else. `fromName` is sanitized
+  and formatted as `"Marcus Vance" <marcus@…>`. Sends are rate-limited per
+  From address (`SEND_MAX_PER_HOUR`, default 100) and optionally globally
+  per day (`SEND_MAX_PER_DAY`). Unconfigured outbound -> 503, provider 429 ->
+  429 with `Retry-After`, other failures -> 502. Config is validated at boot
+  and reported in `/health` as `outbound` / `outboundConfigured` (plus the
+  legacy `relay` status).
+
+## Outbound through Brevo or Resend (free tiers)
+
+SMTP relays work, but free-tier providers also expose an HTTP API where one
+API key can send as any address at a verified domain. Point the service at
+one and every account keeps sending with its own From:
+
+```bash
+export OUTBOUND_PROVIDER=resend      # or brevo; smtp keeps the relay path
+export RESEND_API_KEY=re_...         # BREVO_API_KEY=xkeysib-... for Brevo
+export SEND_MAX_PER_DAY=100          # stay under the plan's daily allowance
+```
+
+`POST /api/send` then takes
+`{ from, fromName?, to, subject, text, html? }`; `from` must still be an
+address this service minted for the caller (403 otherwise), and `fromName`
+lets an agent send as `Marcus Vance <marcus.vance@yourdomain.com>` without a
+separate mailbox. The provider request is shaped per API: Resend gets
+`from`/`to`/`subject`/`text`/`html` at `POST /emails`; Brevo gets
+`sender`/`to`/`subject`/`textContent`/`htmlContent` at
+`POST /v3/smtp/email`.
+
+**Provider setup (account-specific values):**
+
+- Resend: Dashboard -> Domains -> add the domain, then publish exactly the
+  DKIM/SPF records it shows (TXT, or MX/CNAME where offered). Once verified,
+  any local part at that domain can be a From address — no per-address setup.
+- Brevo: Senders & Domains -> authenticate the domain, then publish the Brevo
+  code, DKIM record(s) and the DMARC record it shows. SPF/MX are only needed
+  here for a dedicated IP, not for domain authentication.
+- DNS is account-specific, so copy the provider's values rather than guessing.
+  Keep exactly one SPF record and one DMARC record: if this service also
+  publishes `v=spf1 a mx ~all`, merge includes into that single TXT (for
+  example `v=spf1 a mx include:<provider include> ~all`), and keep the DKIM
+  selectors distinct (this service's `mail._domainkey` vs the provider's).
+
+**Practical limits when 1,000 agents share one domain:**
+
+- **Warm up**: a fresh domain sending hundreds of signups on day one looks
+  like abuse. Stagger agent signups over days/weeks and raise volume slowly;
+  free tiers are small anyway (Resend ~100/day, Brevo 300/day), and
+  `SEND_MAX_PER_DAY` enforces the ceiling this deployment promises.
+- **Platform rules**: banks, social networks and major clouds often require a
+  unique phone number/CAPTCHA and forbid automated account creation. Email
+  alone will not get through, and circumventing those rules is out of scope.
+- **Subdomain isolation**: send agent mail from a subdomain (e.g.
+  `mail.yourdomain.com` or `agents.yourdomain.com`) so complaints and
+  reputation damage stay off the root domain. Set `MAIL_DOMAIN` and
+  `DKIM_DOMAIN` to that subdomain and verify it at the provider.
+
+**Status:** this path is implemented and tested against a local fake provider
+over real HTTP (`test/outbound.test.js`: display-name formatting, wire shape,
+429/502 mapping, ownership rejection), but **no provider key or verified
+domain exists in this workspace, so no live email has been sent through
+Resend or Brevo yet**. That step needs the account owner's provider key and
+DNS control.
 
 ## Environment
 
@@ -240,6 +299,10 @@ to send. Without it everything is in memory and lost on restart.
 | `INCOMING_WEBHOOK_TIMEOUT_MS` | no | webhook delivery timeout, default 8000 |
 | `SMTP_RELAY_HOST` / `SMTP_RELAY_PORT` / `SMTP_RELAY_USER` / `SMTP_RELAY_PASS` | no | outbound relay for POST /api/send (unset = sends answer 503) |
 | `SEND_MAX_PER_HOUR` | no | outbound sends per From address per rolling hour (default 100) |
+| `OUTBOUND_PROVIDER` | no | `smtp` (default), `resend`, or `brevo`; unset auto-selects a configured provider key |
+| `RESEND_API_KEY` / `BREVO_API_KEY` | no | provider API key for `/api/send` (free tiers: Resend 3,000/month, Brevo 300/day) |
+| `RESEND_API_BASE` / `BREVO_API_BASE` | no | override provider base URL (tests or a proxy) |
+| `SEND_MAX_PER_DAY` | no | global outbound sends per day across all agents (0 disables) |
 | `SIGNUP_OPEN` | no | `1` (default) allows free `POST /api/accounts`; `0` = master-token only |
 | `SIGNUP_PER_IP_PER_HOUR` / `SIGNUP_MAX_PER_HOUR` | no | signup abuse caps (default 5 per IP, 500 global) |
 | `ADDRESS_QUOTA_PER_ACCOUNT` | no | addresses one account may own (default 25; master unlimited) |

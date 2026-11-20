@@ -26,7 +26,7 @@
  * (RATE_LIMIT_PER_MINUTE) plus hourly quotas (ADDRESS_CREATE_MAX_PER_HOUR,
  * EMAILS_PER_ADDRESS_PER_HOUR), HMAC-signed incoming-mail webhooks,
  * structured request logging, attachment metadata (never content),
- * outbound SMTP relay send (POST /api/send) via SMTP_RELAY_HOST/PORT/USER/PASS.
+ * outbound send (POST /api/send) via SMTP_RELAY_* or a Resend/Brevo HTTP API.
  * Outbound mail is only ever sent FROM an address this service created;
  * foreign From values are rejected.
  *
@@ -104,6 +104,20 @@ const SMTP_RELAY_USER = process.env.SMTP_RELAY_USER || '';
 const SMTP_RELAY_PASS = process.env.SMTP_RELAY_PASS || '';
 // Hourly outbound-send quota per From address (0 disables).
 const SEND_MAX_PER_HOUR = numEnv('SEND_MAX_PER_HOUR', 100);
+// Outbound HTTP API provider: "smtp" (default relay), "resend" (3,000 free
+// emails/month) or "brevo" (300 free/day). When OUTBOUND_PROVIDER is unset, a
+// configured provider key selects that API automatically. Provider API bases
+// are overridable so tests can point at a local server.
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const BREVO_API_KEY = process.env.BREVO_API_KEY || '';
+const RESEND_API_BASE = String(process.env.RESEND_API_BASE || 'https://api.resend.com').replace(/\/+$/, '');
+const BREVO_API_BASE = String(process.env.BREVO_API_BASE || 'https://api.brevo.com').replace(/\/+$/, '');
+const OUTBOUND_PROVIDER = String(
+  process.env.OUTBOUND_PROVIDER || (RESEND_API_KEY ? 'resend' : BREVO_API_KEY ? 'brevo' : 'smtp')
+).trim().toLowerCase();
+// Global daily cap across every agent (0 disables). Free provider tiers are
+// per account, so set this at or below the plan's daily allowance.
+const SEND_MAX_PER_DAY = numEnv('SEND_MAX_PER_DAY', 0);
 
 // --- Accounts: a free, isolated mailbox per agent (thousands of agents) ---
 // Self-serve signup mints an account + API key. Open by default — this is a
@@ -174,6 +188,26 @@ function validateRelayConfig() {
 }
 const RELAY_STATUS = validateRelayConfig();
 
+function validateOutboundConfig() {
+  if (OUTBOUND_PROVIDER === 'smtp') {
+    return { provider: 'smtp', configured: RELAY_STATUS.status === 'configured', problems: RELAY_STATUS.problems };
+  }
+  if (OUTBOUND_PROVIDER === 'resend' || OUTBOUND_PROVIDER === 'brevo') {
+    const envName = OUTBOUND_PROVIDER === 'resend' ? 'RESEND_API_KEY' : 'BREVO_API_KEY';
+    const key = OUTBOUND_PROVIDER === 'resend' ? RESEND_API_KEY : BREVO_API_KEY;
+    if (!key) {
+      console.warn(`[outbound] ${OUTBOUND_PROVIDER} selected but ${envName} is missing — /api/send will answer 503`);
+      return { provider: OUTBOUND_PROVIDER, configured: false, problems: [`${envName} is not set`] };
+    }
+    console.log(`[outbound] using ${OUTBOUND_PROVIDER} HTTP API`);
+    return { provider: OUTBOUND_PROVIDER, configured: true, problems: [] };
+  }
+  const problem = `OUTBOUND_PROVIDER "${OUTBOUND_PROVIDER}" must be smtp, resend or brevo`;
+  console.warn(`[outbound] ${problem} — /api/send will answer 503`);
+  return { provider: OUTBOUND_PROVIDER, configured: false, problems: [problem] };
+}
+const OUTBOUND_STATUS = validateOutboundConfig();
+
 // --- Outbound send path (POST /api/send) ---
 // The nodemailer transport is created lazily from the relay env and cached;
 // setSendTransport() swaps it for a stub in tests.
@@ -201,6 +235,70 @@ function getSendTransport() {
 // Test hook: replace the live relay transport with a stub (or null to
 // restore lazy creation from env).
 function setSendTransport(t) { sendTransport = t || null; }
+
+// Build the provider-specific HTTP request. Pure, so the wire shape of both
+// providers is unit-testable without network access.
+function buildOutboundRequest(provider, { from, fromName, to, subject, text, html }, config = {}) {
+  const name = String(fromName || '').replace(/["\\\r\n<>]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (provider === 'resend') {
+    return {
+      url: `${config.apiBase || RESEND_API_BASE}/emails`,
+      headers: {
+        authorization: `Bearer ${config.apiKey || RESEND_API_KEY}`,
+        'content-type': 'application/json',
+      },
+      body: {
+        from: name ? `${name} <${from}>` : from,
+        to,
+        subject: subject || '(no subject)',
+        ...(text ? { text } : {}),
+        ...(html ? { html } : {}),
+      },
+    };
+  }
+  if (provider === 'brevo') {
+    return {
+      url: `${config.apiBase || BREVO_API_BASE}/v3/smtp/email`,
+      headers: {
+        'api-key': config.apiKey || BREVO_API_KEY,
+        'content-type': 'application/json',
+      },
+      body: {
+        sender: { email: from, ...(name ? { name } : {}) },
+        to: to.map(email => ({ email })),
+        subject: subject || '(no subject)',
+        ...(text ? { textContent: text } : {}),
+        ...(html ? { htmlContent: html } : {}),
+      },
+    };
+  }
+  throw new Error(`Unsupported outbound provider: ${provider}`);
+}
+
+// Test hook: swap the HTTP client used for provider sends.
+let providerFetch = (...args) => fetch(...args);
+function setProviderFetch(fn) { providerFetch = typeof fn === 'function' ? fn : (...args) => fetch(...args); }
+
+async function sendViaProvider(msg) {
+  const req = buildOutboundRequest(OUTBOUND_PROVIDER, msg);
+  const res = await providerFetch(req.url, {
+    method: 'POST',
+    headers: req.headers,
+    body: JSON.stringify(req.body),
+  });
+  const raw = await res.text().catch(() => '');
+  let payload = {};
+  if (raw) {
+    try { payload = JSON.parse(raw); } catch { payload = {}; }
+  }
+  if (!res.ok) {
+    const detail = payload.message || (payload.error && payload.error.message) || raw.slice(0, 300) || `HTTP ${res.status}`;
+    const err = new Error(`${OUTBOUND_PROVIDER} API ${res.status}: ${detail}`);
+    err.status = res.status === 429 ? 429 : 502;
+    throw err;
+  }
+  return { messageId: payload.id || payload.messageId || null, accepted: msg.to, rejected: [] };
+}
 
 const MAX_SEND_RECIPIENTS = 10;
 const MAX_SEND_BODY_CHARS = 100000;
@@ -245,14 +343,20 @@ function validateSendBody(body) {
   if (text.length > MAX_SEND_BODY_CHARS || html.length > MAX_SEND_BODY_CHARS) {
     return { ok: false, error: 'message body is too long' };
   }
-  return { ok: true, value: { from, to: recipients, subject, text, html: html || undefined } };
+  const rawFromName = body.fromName === undefined || body.fromName === null ? '' : String(body.fromName);
+  if (rawFromName.length > 120) {
+    return { ok: false, error: 'fromName is too long' };
+  }
+  // Strip characters that could break or inject a header.
+  const fromName = rawFromName.replace(/["\\\r\n<>]/g, ' ').replace(/\s+/g, ' ').trim();
+  return { ok: true, value: { from, fromName, to: recipients, subject, text, html: html || undefined } };
 }
 
 // Core outbound send. Throws an Error with .status for HTTP mapping.
 // The From address must be one this service created (in the address
 // registry) and, for account keys, one the caller owns; foreign From values
 // are rejected so the service can never be used to send mail as someone else.
-async function sendAgentMail({ from, to, subject, text, html }, actor) {
+async function sendAgentMail({ from, fromName, to, subject, text, html }, actor) {
   const role = actor && actor.role ? actor.role : 'master';
   const owner = await ownershipFor(from);
   if (owner === undefined) {
@@ -270,27 +374,45 @@ async function sendAgentMail({ from, to, subject, text, html }, actor) {
     err.status = 429;
     throw err;
   }
-  const transport = getSendTransport();
-  if (!transport) {
-    const err = new Error(`Outbound relay is not configured (status: ${RELAY_STATUS.status})`);
+  if (SEND_MAX_PER_DAY > 0 && !rateLimitWindow('send:day:all', SEND_MAX_PER_DAY, 24 * 60 * 60 * 1000)) {
+    const err = new Error(`Daily send cap reached (${SEND_MAX_PER_DAY} per day across all agents)`);
+    err.status = 429;
+    throw err;
+  }
+  if (OUTBOUND_PROVIDER !== 'smtp' && !OUTBOUND_STATUS.configured) {
+    const detail = OUTBOUND_STATUS.problems[0] || `${OUTBOUND_PROVIDER} is not configured`;
+    const err = new Error(`Outbound is not configured: ${detail}`);
     err.status = 503;
     throw err;
   }
   try {
-    const info = await transport.sendMail({ from, to, subject, text, html });
+    let info;
+    if (OUTBOUND_PROVIDER === 'smtp') {
+      const transport = getSendTransport();
+      if (!transport) {
+        const err = new Error(`Outbound relay is not configured (status: ${RELAY_STATUS.status})`);
+        err.status = 503;
+        throw err;
+      }
+      info = await transport.sendMail({ from, to, subject, text, html });
+    } else {
+      info = await sendViaProvider({ from, fromName, to, subject, text, html });
+    }
     console.log(JSON.stringify({
-      level: 'info', type: 'smtp-send',
+      level: 'info', type: 'outbound-send', provider: OUTBOUND_PROVIDER,
       from, to, messageId: info.messageId || null,
     }));
     return {
+      provider: OUTBOUND_PROVIDER,
       messageId: info.messageId || null,
-      accepted: info.accepted || [],
+      accepted: info.accepted || to,
       rejected: info.rejected || [],
     };
   } catch (err) {
-    console.error(`[smtp-send] relay failed for ${from}: ${err.message}`);
-    const wrapped = new Error(`Relay send failed: ${err.message}`);
-    wrapped.status = 502;
+    if (err.status === 429) throw err;
+    console.error(`[outbound:${OUTBOUND_PROVIDER}] send failed for ${from}: ${err.message}`);
+    const wrapped = new Error(`Send failed: ${err.message}`);
+    wrapped.status = err.status || 502;
     throw wrapped;
   }
 }
@@ -1315,6 +1437,8 @@ app.get('/health', async (req, res) => {
       dkim: DKIM_STATUS.status,
       addressQuotaPerAccount: ADDRESS_QUOTA_PER_ACCOUNT,
       relay: RELAY_STATUS.status,
+      outbound: OUTBOUND_STATUS.provider,
+      outboundConfigured: OUTBOUND_STATUS.configured,
       httpInbound: INBOUND_SECRET ? 'secret' : 'api-token',
       webhook: WEBHOOK_URL ? 'configured' : 'disabled',
       addressTtlHours: ADDRESS_TTL_HOURS,
@@ -1545,16 +1669,23 @@ app.get('/api/accounts', auth, requireMaster, async (req, res) => {
   }
 });
 
-// Send mail FROM one of this service's own addresses, via the outbound
-// SMTP relay. Auth: same Bearer token as the other routes. The From
-// address must have been created by this service; foreign From values get
-// 403. Relay unconfigured -> 503. Relay failure -> 502.
+// Send mail FROM one of this service's own addresses, via the SMTP relay or
+// the configured Resend/Brevo HTTP API. Auth: same Bearer token as the other
+// routes. The From address must have been created by this service; foreign
+// From values get 403. Unconfigured -> 503. Provider 429 -> 429. Other
+// provider/relay failure -> 502.
 app.post('/api/send', auth, async (req, res) => {
   try {
     const v = validateSendBody(req.body || {});
     if (!v.ok) return res.status(400).json({ ok: false, error: v.error });
     const result = await sendAgentMail(v.value, req.auth);
-    res.json({ ok: true, from: v.value.from, to: v.value.to, ...result });
+    res.json({
+      ok: true,
+      from: v.value.from,
+      ...(v.value.fromName ? { fromName: v.value.fromName } : {}),
+      to: v.value.to,
+      ...result,
+    });
   } catch (err) {
     if (err.status === 429) res.setHeader('Retry-After', '3600');
     res.status(err.status || 500).json({ ok: false, error: err.message });
@@ -1868,6 +1999,9 @@ module.exports = {
   backoffMs,
   sweepExpiredAddresses,
   validateSendBody,
+  buildOutboundRequest,
+  setProviderFetch,
+  outboundStatus: () => OUTBOUND_STATUS,
   sendAgentMail,
   getSendTransport,
   setSendTransport,

@@ -18,6 +18,7 @@ const {
   rankLinks,
   decodeEntities,
   validateSendBody,
+  buildOutboundRequest,
   sendAgentMail,
   setSendTransport,
   registerAddress,
@@ -327,6 +328,58 @@ async function atest(name, fn) {
     } finally {
       setSendTransport(null);
     }
+  });
+
+  await atest('validateSendBody sanitizes fromName and rejects an oversized one', () => {
+    const v = validateSendBody({
+      from: 'a@mail.example.test',
+      fromName: '"Marcus\r\nBcc: x@y.com" <Vance>',
+      to: 'x@y.com',
+      text: 'hi',
+    });
+    assert.equal(v.ok, true);
+    assert.equal(v.value.fromName, 'Marcus Bcc: x@y.com Vance');
+    assert.equal(validateSendBody({
+      from: 'a@mail.example.test',
+      fromName: 'n'.repeat(121),
+      to: 'x@y.com',
+      text: 'hi',
+    }).ok, false);
+  });
+
+  await atest('buildOutboundRequest shapes a Resend send', () => {
+    const req = buildOutboundRequest('resend', {
+      from: 'marcus@mail.example.test',
+      fromName: 'Marcus Vance',
+      to: ['human@example.com'],
+      subject: 'Hello',
+      text: 'plain',
+      html: '<b>rich</b>',
+    }, { apiKey: 're_test_key', apiBase: 'https://api.test' });
+    assert.equal(req.url, 'https://api.test/emails');
+    assert.equal(req.headers.authorization, 'Bearer re_test_key');
+    assert.equal(req.body.from, 'Marcus Vance <marcus@mail.example.test>');
+    assert.deepEqual(req.body.to, ['human@example.com']);
+    assert.equal(req.body.subject, 'Hello');
+    assert.equal(req.body.text, 'plain');
+    assert.equal(req.body.html, '<b>rich</b>');
+  });
+
+  await atest('buildOutboundRequest shapes a Brevo send', () => {
+    const req = buildOutboundRequest('brevo', {
+      from: 'marcus@mail.example.test',
+      fromName: 'Marcus Vance',
+      to: ['human@example.com'],
+      subject: 'Hello',
+      text: 'plain',
+      html: '<b>rich</b>',
+    }, { apiKey: 'brevo_test_key', apiBase: 'https://brevo.test' });
+    assert.equal(req.url, 'https://brevo.test/v3/smtp/email');
+    assert.equal(req.headers['api-key'], 'brevo_test_key');
+    assert.deepEqual(req.body.sender, { email: 'marcus@mail.example.test', name: 'Marcus Vance' });
+    assert.deepEqual(req.body.to, [{ email: 'human@example.com' }]);
+    assert.equal(req.body.textContent, 'plain');
+    assert.equal(req.body.htmlContent, '<b>rich</b>');
   });
 
   if (failures > 0) {

@@ -31,6 +31,14 @@ services:
         sync: false
       - key: SEND_MAX_PER_HOUR
         value: "100"
+      - key: OUTBOUND_PROVIDER
+        sync: false # smtp (default), resend or brevo
+      - key: RESEND_API_KEY
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: SEND_MAX_PER_DAY
+        value: "0"
       - key: SIGNUP_OPEN
         value: "1"
       - key: ADDRESS_QUOTA_PER_ACCOUNT
