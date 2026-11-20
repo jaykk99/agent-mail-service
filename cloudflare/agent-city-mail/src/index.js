@@ -166,7 +166,7 @@ export default {
     const from = String(message.from || '').slice(0,320);
     await env.DB.prepare(
       'INSERT OR IGNORE INTO messages(id,agent_id,direction,sender,recipient,subject,text_body) VALUES(?,?,?,?,?,?,?)',
-    ).bind(String(parsed.messageId || crypto.randomUUID()).slice(0,250),identity.agentId,
+    ).bind((address + '|' + String(parsed.messageId || crypto.randomUUID())).slice(0,500),identity.agentId,
       'inbound',from,address,subject,text).run();
   },
 };
