@@ -35,7 +35,8 @@ def _mounted_removables():
         if len(parts) < 5:
             continue
         mount = Path(_decode_mount(parts[4]))
-        device = right.split()[-1] if right.split() else ""
+        fields = right.split()
+        device = fields[1] if len(fields) >= 2 else ""
         if mount.parts[:2] in (("/", "media"), ("/", "mnt")) or str(mount).startswith("/run/media/"):
             if (device.startswith("/dev/") or str(mount).startswith("/run/media/")) and mount.is_dir():
                 results.add(mount)
@@ -111,6 +112,9 @@ def choose_storage(*, state_dir=None, home=None, mount_points=None):
     if state_dir:
         requested = Path(state_dir).expanduser().resolve()
         requested.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(requested, 0o700)
+        if not supports_private_storage(requested):
+            raise RuntimeError(f"Explicit state directory cannot protect private credentials: {requested}")
         return Choice(requested, "explicit", usbs, "Using explicitly configured state directory")
 
     config = home / ".config" / "agent-comms"
