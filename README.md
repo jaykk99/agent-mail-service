@@ -332,19 +332,24 @@ webhook for memory/database writes.
    the same place as your DKIM/DMARC records.
 2. Dashboard -> Email -> Email Routing -> Enable. Cloudflare creates the MX
    and SPF records for the domain automatically.
-3. Deploy the worker:
+3. Deploy the worker with an API token — `wrangler login` is not needed:
 
    ```bash
    cd cloudflare/email-worker
    npm install
-   npx wrangler login
-   npx wrangler secret put INBOUND_SECRET   # = AGENT_MAIL_INBOUND_SECRET
-   npx wrangler deploy
+   export CLOUDFLARE_API_TOKEN=...   # Workers Scripts:Edit, Zone:Email Routing:Edit
+   export CLOUDFLARE_ACCOUNT_ID=...
+   npm run deploy                    # npm run deploy:dry bundles without uploading
    ```
 
+   `scripts/deploy.mjs` refuses to run without `CLOUDFLARE_API_TOKEN` and
+   `CLOUDFLARE_ACCOUNT_ID` and names the missing one, so CI can gate on it.
    Set `INBOUND_URL` in `wrangler.toml` to your service's `/api/inbound`
-   first. For the optional agent push, also set `AGENT_WEBHOOK_URL` there and
-   `AGENT_WEBHOOK_SECRET` via `wrangler secret put`.
+   first; set `AGENT_WEBHOOK_URL` there too for the optional agent push.
+   `INBOUND_SECRET` (= `AGENT_MAIL_INBOUND_SECRET`) and the optional
+   `AGENT_WEBHOOK_SECRET` are Worker secrets: add them under Workers &
+   Pages -> `agent-mail-inbound` -> Settings -> Variables, or with
+   `npx wrangler secret put NAME` after exporting the token.
 4. Dashboard -> Email Routing -> Routes -> Catch-all address -> Send to
    Worker -> `agent-mail-inbound`. Every address at the domain, including
    ones created after this step, now reaches the worker.
@@ -359,3 +364,16 @@ Delivery failures from `/api/inbound` make the worker throw, so Cloudflare
 retries the message instead of dropping a verification email. Keep
 `DMARC_POLICY=none` until `/api/dns` reports `dkim: configured` and a test
 message shows `dkim=pass`, then raise it to `quarantine`.
+
+`npm test` includes a loopback version of this exact path
+(`delivery.integration.test.js`): real Worker handler, real HTTP to a spawned
+`/api/inbound`, real webhook listener, no mocked transport.
+
+**Deployment status:** the worker code, its real-HTTP delivery test and the
+bundle path are verified locally, but **no Worker has been deployed, no DNS
+or Email Routing change has been made, and no real internet email has
+traversed this path yet** — those need the domain owner's Cloudflare
+account. The hosted backend is also still blocked: Render suspended
+`agent-mail-service` with "Free Tier Usage Exceeded", so `INBOUND_URL` must
+point at a live `/api/inbound` (upgraded Render, a VPS, or another host)
+before any mail can be stored.

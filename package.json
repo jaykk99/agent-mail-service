@@ -5,17 +5,18 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/unit.test.js && node test/e2e.test.js && node cloudflare/email-worker/test/extract.test.js",
-    "check": "node --check server.js && node --check test/e2e.test.js && node --check test/unit.test.js && node --check cloudflare/email-worker/src/extract.js && node --check cloudflare/email-worker/src/index.js && node --check cloudflare/email-worker/test/extract.test.js"
+    "test": "node test/unit.test.js && node test/e2e.test.js && node cloudflare/email-worker/test/extract.test.js && node cloudflare/email-worker/test/delivery.integration.test.js && node cloudflare/email-worker/test/deploy.test.js",
+    "check": "node --check server.js && node --check test/e2e.test.js && node --check test/unit.test.js && node --check cloudflare/email-worker/src/extract.js && node --check cloudflare/email-worker/src/index.js && node --check cloudflare/email-worker/test/extract.test.js && node --check cloudflare/email-worker/test/delivery.integration.test.js && node --check cloudflare/email-worker/test/deploy.test.js && node --check cloudflare/email-worker/scripts/deploy.mjs"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2",
     "express": "^4.18.2",
-    "smtp-server": "^3.12.0",
     "mailparser": "^3.6.5",
     "nodemailer": "^10.1.7",
-    "@supabase/supabase-js": "^2"
+    "postal-mime": "^4.2.1",
+    "smtp-server": "^3.12.0"
   }
 }

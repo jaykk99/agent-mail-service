@@ -5,9 +5,10 @@
   "type": "module",
   "description": "Cloudflare Email Worker: catch-all receiving for agent-mail-service",
   "scripts": {
-    "deploy": "wrangler deploy",
+    "deploy": "node scripts/deploy.mjs",
+    "deploy:dry": "node scripts/deploy.mjs --dry-run",
     "dev": "wrangler dev",
-    "test": "node test/extract.test.js"
+    "test": "node test/extract.test.js && node test/deploy.test.js"
   },
   "dependencies": {
     "postal-mime": "^4.2.1"
