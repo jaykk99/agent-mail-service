@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Keep the local Monico Linux services healthy under a user systemd unit.
 
-Run this through linux/enable_autostart.sh after installing the dependencies.
+Run this through linux/autostart.py --enable after installing dependencies.
 No paid services and no external email/telephone claims. Public HTTPS requires
 an explicit --public-ip and --allow-public opt-in at setup.
 """
