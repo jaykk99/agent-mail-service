@@ -95,6 +95,51 @@ needed for seamless HTTPS/microphone permissions. An own-CA deployment is
 better for a controlled fleet of agents. Supplying a certificate does NOT
 make a computer reachable behind an ISP NAT or router.
 
+
+## Option C: a public Tor onion address (no public IP or registered domain)
+
+If your ISP uses CGNAT and you do not have a public inbound IP/port, you
+can prepare a self-hosted Tor v3 onion service. This yields a publicly
+reachable **.onion address for Tor-capable clients**, not an ordinary
+Chrome/Safari URL and not a carrier phone/SMS/internet-email address.
+
+On Linux:
+
+~~~bash
+sudo apt-get install -y tor
+cd ~/agent-mail-service
+git pull
+bash start.sh
+~~~
+
+In a **second** terminal, stage the Tor configuration:
+
+~~~bash
+python3 phone/onion_gateway.py --output .generated/torrc.monico
+cat .generated/torrc.monico
+~~~
+
+On a Linux system where you administer the Tor service, review and copy
+that snippet into a Tor config include file, following your distribution's
+Tor service setup. It routes onion HTTP port 80 to **127.0.0.1:8765**, where
+the existing token-authenticated Monico server runs. Do NOT bind the raw
+HTTP service to a public IP. Once the Tor daemon is running and reports
+a healthy onion service, the locally created hostname file at
+/var/lib/tor/monico-agents/hostname gives its random, self-authenticating
+v3 onion address. This script does NOT register, start or connect anything.
+
+Authorized agents can visit http://YOUR_GENERATED_ONION.onion using
+Tor Browser, or connect through an appropriately configured Tor-aware
+HTTP client, then authenticate with their own private bearer tokens.
+Do not assume ordinary browsers can reach .onion directly.
+
+**Tradeoff:** no domain registration, purchased server, public inbound port,
+or trusted Web PKI certificate is required, but Tor is itself a public
+third-party volunteer relay network. Under a literal no-other-network-
+operators condition this option is not self-contained. Tor Browser also
+restricts WebRTC, so browser voice calls are not assured; internal messaging
+and inbox access are the realistic primary use cases.
+
 ## Port and security setup
 
 - Router: forward external TCP 8766 to the same port on Linux.
