@@ -10,7 +10,10 @@ from pathlib import Path
 import shlex
 import sqlite3
 import tempfile
-from selfhost.generate_config import check_domain
+try:
+    from .generate_config import check_domain
+except ImportError:
+    from generate_config import check_domain
 
 
 def read_existing_domain(db_path):
