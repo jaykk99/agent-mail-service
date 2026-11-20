@@ -107,6 +107,77 @@ databases. Make encrypted backups to another Linux filesystem, protecting
 the secrets and not logging them. Don't store the mailbox secrets in a
 public repository.
 
+## Optional: Start your own public HTTPS browser gateway
+
+This exposes **only the Monico browser messenger, private extensions, and
+WebRTC signaling**, not an open public SMTP relay or cellular network.
+You must already have a routable public IPv4 under your control, forwarded
+to the Linux host on TCP 8766. ChromeOS's local Linux port-forwarding alone
+does not make an ISP/router accept arbitrary internet traffic.
+
+After running `bash start.sh --full up --install`, you can stage
+HTTPS credentials **without exposing anything**:
+
+~~~bash
+bash start.sh --public prepare --public-ip YOUR_ACTUAL_PUBLIC_IPV4
+bash start.sh --public status
+~~~
+
+This generates a private local certificate authority and an IP-specific
+TLS certificate. Only install the PUBLIC `monico-ca.crt` on devices you
+trust. **Never distribute `monico-ca.key` or `server.key`.**
+
+To deliberately start HTTPS bound to all Linux interfaces:
+
+~~~bash
+bash start.sh --public up --allow-public
+bash start.sh --public doctor
+~~~
+
+Alternatively, once the local dependencies are installed, start
+**phone + named-mail MCP + HTTPS gateway in one command**:
+
+~~~bash
+bash start.sh --full up \
+  --public-ip YOUR_ACTUAL_PUBLIC_IPV4 \
+  --allow-public
+~~~
+
+This command prepares the certificate if necessary and starts all three
+services. It rejects missing opt-in, private IP addresses, certificate
+identity changes, and occupied ports. The HTTPS gateway uses the **same**
+pinned agent identity/credential store as the local dashboard and does
+not publish the private MCP port 8787.
+
+The intended URL is `https://YOUR_ACTUAL_PUBLIC_IPV4:8766`. To establish
+that it really works across the public internet, use a different machine
+on a different network (such as mobile data with a Linux shell) and run:
+
+~~~bash
+python3 phone/probe_public.py \
+  --url "https://YOUR_ACTUAL_PUBLIC_IPV4:8766" \
+  --ca-cert /safe/path/to/monico-ca.crt
+~~~
+
+The probe verifies trusted TLS, the 1,000-agent response, and unauthorized
+API rejection. It **does not** test PSTN phone numbers, carrier SMS, actual
+WebRTC audio across NAT, or external email delivery.
+
+Manage the public gateway independently with:
+
+~~~bash
+bash start.sh --public status
+bash start.sh --public stop
+~~~
+
+The unified `bash start.sh --full doctor` report also shows the public
+gateway's *local* TLS health and explicitly marks outside-network access
+unverified. `bash start.sh --full stop` stops the public gateway and
+both local services. Restarting with `--full up` **does not reopen** the
+public listener automatically; use `--allow-public` again.
+
+---
+
 ## Public integration (separate from local setup)
 
 To make the **browser app** accessible across the internet, you need a
