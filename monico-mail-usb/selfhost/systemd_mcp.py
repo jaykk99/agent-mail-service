@@ -30,6 +30,8 @@ Description=Monico Mail local MCP (per-agent identity)
 Wants=network-online.target
 After=network-online.target
 RequiresMountsFor={data}
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -41,8 +43,6 @@ ExecStartPre=/usr/bin/test -w {data}
 ExecStart={project}/.venv/bin/python {project}/server.py
 Restart=on-failure
 RestartSec=5s
-StartLimitIntervalSec=60
-StartLimitBurst=5
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
