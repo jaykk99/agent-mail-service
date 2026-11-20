@@ -38,6 +38,11 @@ TOOLS = [
      'inputSchema': {'type': 'object', 'properties': {}}},
     {'name': 'phone_claim', 'description': 'Claim/read this agent’s stable private extension. Not a real mobile number.',
      'inputSchema': {'type': 'object', 'properties': {}}},
+    {'name': 'webphone_number', 'description': 'Read this agent’s free self-hosted web:NNNN number, not a carrier number.',
+     'inputSchema': {'type': 'object', 'properties': {}}},
+    {'name': 'webphone_guest_invite', 'description': 'Create a short-lived one-use link so a browser guest can message or call this agent.',
+     'inputSchema': {'type': 'object', 'properties': {
+         'ttlMinutes': {'type': 'integer', 'minimum': 5, 'maximum': 120}}}},
     {'name': 'routing_status', 'description': 'See which phone and mail routes work locally and which public routes are unavailable.',
      'inputSchema': {'type': 'object', 'properties': {}}},
     {'name': 'email_addresses', 'description': 'List this agent’s self-hosted local inbox addresses.',
@@ -80,6 +85,10 @@ def execute(name, args):
         return request('/api/me')
     if name == 'phone_claim':
         return request('/api/phone/claim', {})
+    if name == 'webphone_number':
+        return request('/api/webphone')
+    if name == 'webphone_guest_invite':
+        return request('/api/webphone/invites', {'ttlMinutes': args.get('ttlMinutes', 30)})
     if name == 'routing_status':
         return request('/api/routes')
     if name == 'email_addresses':
