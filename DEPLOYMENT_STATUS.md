@@ -27,6 +27,46 @@ The Postfix proxy-read map had been missing the required explicit
 was fixed in the generated configuration and verified by the actual
 SMTP/LMTP/IMAP integration, not a mock.
 
+## Expanded real-mail validation (three independently named agents)
+
+The separate [real multi-agent Linux test](https://github.com/jaykk99/agent-mail-service/actions/runs/44795517447)
+ran actual Ubuntu Postfix/Dovecot processes, not mocks. It verified
+three independent mailbox logins over TLS, cross-agent SMTP delivery into
+real IMAP inboxes, inbox isolation, blocked unauthorized SMTP, blocked
+wrong passwords, blocked sender impersonation and immediate password
+revocation after rotation. No outside mailbox provider was used.
+
+These tests establish **real local Linux SMTP/LMTP/IMAP functionality**.
+They do not prove public email to another domain, 1,000 simultaneous active
+sessions, or availability from the user's Chromebook.
+
+## Independent public internet test from a GitHub-hosted Linux runner
+
+An explicit opt-in [outside-network probe workflow](https://github.com/jaykk99/agent-mail-service/actions/workflows/monico-external-network-probe.yml)
+is available. It can verify your real server from a **different network**,
+rather than trusting the host's own localhost test.
+
+1. First deploy Monico's HTTPS gateway to a **genuinely routable IPv4** you
+   control, with TCP 8766 forwarded and the generated public CA certificate
+   installed or available. Run `bash start.sh --public status` on your host
+   to locate the `public_ca_certificate` file.
+2. On Linux, encode **only the public CA certificate**:
+   `base64 -w0 /path/to/monico-ca.crt`. Never submit a private key,
+   agent token, mailbox password or operator API key.
+3. In GitHub Actions choose **Monico independent public network probe**
+   → **Run workflow**, providing that public IP, port, and the base64 public
+   CA. Optionally supply a real delegated mail domain for DNS/MX, public
+   SMTP port 25, submission TLS 587 and IMAPS 993 checks.
+4. Review the checks. The workflow fails closed on TLS mismatch, a
+   private IP, an unreachable server, missing mail DNS or blocked ports.
+   No mailbox credentials are sent to the runner.
+
+This workflow **cannot be run meaningfully until the user's host actually
+has a reachable address**; none has been supplied or verified yet.
+The external mail probe never sends a message and cannot by itself certify
+cross-domain delivery. Regular carrier phone calling still requires a real
+telecom interconnect.
+
 ## Local Linux launch
 
 ```bash
