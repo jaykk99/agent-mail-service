@@ -59,6 +59,9 @@ inet_protocols = {protocols}
 mynetworks = 127.0.0.0/8
 virtual_mailbox_domains = {domain}
 virtual_mailbox_maps = proxy:sqlite:/etc/postfix/sqlite-virtual-mailboxes.cf
+# Postfix proxymap must approve the authenticated sender lookup explicitly.
+# Preserve its standard read maps rather than allowing unrestricted proxy access.
+proxy_read_maps = $local_recipient_maps, $mydestination, $virtual_alias_maps, $virtual_alias_domains, $virtual_mailbox_maps, $virtual_mailbox_domains, $relay_recipient_maps, $relay_domains, $canonical_maps, $sender_canonical_maps, $recipient_canonical_maps, $relocated_maps, $transport_maps, $mynetworks, $smtpd_sender_login_maps, proxy:sqlite:/etc/postfix/sqlite-sender-login.cf
 virtual_transport = lmtp:unix:private/dovecot-lmtp
 smtpd_relay_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination
 smtpd_recipient_restrictions = reject_unauth_destination
