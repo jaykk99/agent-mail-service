@@ -24,7 +24,7 @@ def check_domain(domain):
     return validated(domain)
 
 
-def check_environment(data_dir, domain, host, public_ip, live=False):
+def check_environment(data_dir, domain, host, public_ip, live=False, public_ipv6=None):
     results = []
 
     def report(name, passed, reason, level="required"):
@@ -41,13 +41,29 @@ def check_environment(data_dir, domain, host, public_ip, live=False):
         report("hostname", True, host)
 
     ip = None
-    try:
-        ip = ipaddress.ip_address(public_ip)
-        if ip.version != 4 or not ip.is_global:
-            raise ValueError("IPv4 must be globally routable")
-        report("public-ip", True, str(ip))
-    except ValueError as e:
-        report("public-ip", False, str(e))
+    ip6 = None
+    if not public_ip and not public_ipv6:
+        report("public-address", False, "Provide a global IPv4 or IPv6 address")
+    if public_ip:
+        try:
+            ip = ipaddress.ip_address(public_ip)
+            if ip.version != 4 or not ip.is_global:
+                raise ValueError("IPv4 must be globally routable")
+            report("public-ip", True, str(ip))
+        except ValueError as e:
+            report("public-ip", False, str(e))
+    else:
+        report("public-ip", False, "No IPv4 address configured", "warning")
+    if public_ipv6:
+        try:
+            ip6 = ipaddress.ip_address(public_ipv6)
+            if ip6.version != 6 or not ip6.is_global:
+                raise ValueError("IPv6 must be globally routable")
+            report("public-ipv6", True, str(ip6))
+        except ValueError as e:
+            report("public-ipv6", False, str(e))
+    else:
+        report("public-ipv6", False, "No IPv6 address configured", "warning")
 
     storage = Path(data_dir).expanduser().resolve()
     report("usb-path", "/mnt/chromeos/removable/" in str(storage) + "/" or str(storage).startswith("/mnt/"),
@@ -96,11 +112,21 @@ def check_environment(data_dir, domain, host, public_ip, live=False):
                f"{program} must be installed on the host", "required" if live else "warning")
 
     if live:
-        try:
-            resolved = set(socket.gethostbyname_ex(host)[2])
-            report("dns-host-a", str(ip) in resolved, f"{host} A addresses: {sorted(resolved)}")
-        except (OSError, ValueError) as e:
-            report("dns-host-a", False, str(e))
+        if ip:
+            try:
+                resolved = set(socket.gethostbyname_ex(host)[2])
+                report("dns-host-a", str(ip) in resolved, f"{host} A addresses: {sorted(resolved)}")
+            except (OSError, ValueError) as e:
+                report("dns-host-a", False, str(e))
+        if ip6:
+            try:
+                resolved6 = {addr[4][0] for addr in socket.getaddrinfo(
+                    host, None, family=socket.AF_INET6, type=socket.SOCK_STREAM
+                )}
+                report("dns-host-aaaa", str(ip6) in resolved6,
+                       f"{host} AAAA addresses: {sorted(resolved6)}")
+            except OSError as e:
+                report("dns-host-aaaa", False, str(e))
         dig = shutil.which("dig")
         if dig:
             def dig_records(*args):
@@ -115,9 +141,11 @@ def check_environment(data_dir, domain, host, public_ip, live=False):
             report("dns-spf", any("v=spf1" in row for row in spf), "SPF TXT " + repr(spf))
             dmarc = dig_records("TXT", "_dmarc." + domain)
             report("dns-dmarc", any("v=DMARC1" in row for row in dmarc), "DMARC TXT " + repr(dmarc))
-            ptr = dig_records("-x", public_ip)
-            report("dns-ptr", any(row.rstrip(".").lower() == host.rstrip(".").lower() for row in ptr),
-                   "PTR " + repr(ptr))
+            for label, address in (("dns-ptr", ip), ("dns-ptr-ipv6", ip6)):
+                if address:
+                    ptr = dig_records("-x", str(address))
+                    report(label, any(row.rstrip(".").lower() == host.rstrip(".").lower()
+                                      for row in ptr), "PTR " + repr(ptr))
         else:
             for key in ("dns-mx", "dns-ns", "dns-spf", "dns-dmarc", "dns-ptr"):
                 report(key, False, "Install dnsutils for authoritative record checks")
@@ -130,6 +158,9 @@ def check_environment(data_dir, domain, host, public_ip, live=False):
         report("tcp25-external", False,
                "Cannot prove inbound TCP/25 from inside your LAN; test from an independent external network",
                "warning")
+        if ip6 and not ip:
+            report("ipv6-only-interoperability", False,
+                   "IPv4-only remote mail servers cannot connect directly to an IPv6-only MX", "warning")
         report("dkim-signature", False,
                "Verify outbound DKIM signing separately; TXT existence alone is insufficient",
                "warning")
@@ -147,10 +178,11 @@ def main():
     parser.add_argument("--data", required=True, help="USB-mounted SQLite directory")
     parser.add_argument("--domain", required=True, help="Delegated public email domain")
     parser.add_argument("--host", required=True, help="Mail host (mail.<domain>)")
-    parser.add_argument("--public-ip", required=True)
+    parser.add_argument("--public-ip", help="Global IPv4; optional if IPv6 provided")
+    parser.add_argument("--public-ipv6", help="Global IPv6; optional if IPv4 provided")
     parser.add_argument("--live", action="store_true", help="Also check public DNS and TCP ports")
     args = parser.parse_args()
-    result = check_environment(args.data, args.domain, args.host, args.public_ip, args.live)
+    result = check_environment(args.data, args.domain, args.host, args.public_ip, args.live, args.public_ipv6)
     print(json.dumps(result, indent=2))
     if not result["ready_for_next_setup_step"]:
         sys.exit(1)
