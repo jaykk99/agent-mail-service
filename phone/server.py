@@ -30,6 +30,26 @@ class AgentPhone:
         provision(self.state_dir, count)
         identities = json.loads((self.state_dir / 'identities.json').read_text())['extensions']
         self.phones = identities
+        # Optional migration of DISPLAY LABELS from Calling-linux.
+        # Never import its invented E.164 numbers, demo OTPs, or delivery flags.
+        self.calling_linux_labels = {}
+        label_file = self.state_dir / 'calling-linux-labels.json'
+        if label_file.is_file():
+            try:
+                payload = json.loads(label_file.read_text(encoding='utf-8'))
+                if (payload.get('schema') == 1 and
+                        payload.get('source') == 'Calling-linux' and
+                        payload.get('publicTelephoneNumbersProvisioned') is False and
+                        isinstance(payload.get('labels'), dict)):
+                    for ext, row in payload['labels'].items():
+                        if ext in identities and isinstance(row, dict):
+                            name = row.get('displayName')
+                            if (isinstance(name, str) and 0 < len(name) <= 80
+                                    and all(31 < ord(char) != 127 for char in name)):
+                                self.calling_linux_labels[ext] = name
+            except (OSError, ValueError, TypeError):
+                # A corrupt optional metadata file cannot revoke/rekey agents.
+                self.calling_linux_labels = {}
         # Random high-entropy credential fingerprint identifies this specific
         # storage vault, preventing accidental cross-connection on reused ports.
         self.instance_id = hashlib.sha256(
@@ -211,13 +231,16 @@ def handler_factory(service, html_path):
                 return self._reply(200, {'ok': True, 'extension': actor,
                                          'agentId': service.phones[actor]['agentId'],
                                          'email': service.phones[actor]['agentId'] + '@' + INTERNAL_DOMAIN,
-                                         'webPhoneNumber': 'web:' + actor})
+                                         'webPhoneNumber': 'web:' + actor,
+                                         'displayName': service.calling_linux_labels.get(
+                                             actor, service.phones[actor]['agentId'])})
             if path == '/api/routes':
                 return self._reply(200, {'ok': True, 'internalMail': True,
                     'internalMessaging': True, 'internalSms': True,
                     'internalCallSignaling': True, 'webphoneGuestLinks': True,
                     'privateWebDomain': 'agents.localhost',
                     'publicDomain': False,
+                    'callingLinuxDisplayLabelsImported': bool(service.calling_linux_labels),
                     'publicEmailRouting': False, 'publicPstnRouting': False,
                     'publicSmsRouting': False, 'domain': INTERNAL_DOMAIN})
             if path == '/api/mailboxes':
@@ -244,7 +267,11 @@ def handler_factory(service, html_path):
                     return self._reply(400, {'ok': False, 'error': 'Invalid pagination'})
                 phones = sorted(service.phones, key=int)
                 return self._reply(200, {'ok': True, 'total': len(phones), 'agents': [
-                    {'extension': ext, 'agentId': service.phones[ext]['agentId']}
+                    {'extension': ext, 'agentId': service.phones[ext]['agentId'],
+                     'displayName': service.calling_linux_labels.get(
+                         ext, service.phones[ext]['agentId']),
+                     'webPhoneNumber': 'web:' + ext,
+                     'publicTelephoneNumber': False}
                     for ext in phones[offset:offset + limit]]})
             if path in ('/api/messages', '/api/signals', '/api/sms/inbox'):
                 after = self._cursor(qs, 'after', 0, 2**63 - 1)
