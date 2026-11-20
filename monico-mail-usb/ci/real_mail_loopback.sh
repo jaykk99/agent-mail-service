@@ -73,10 +73,11 @@ setfacl -m "u:postfix:r,u:dovecot:r" "$DATA/agents.sqlite3"
 chmod 0600 "$DATA/ci-secret"
 chmod 0644 /etc/postfix/sqlite-virtual-mailboxes.cf /etc/postfix/sqlite-sender-login.cf
 chmod 0644 /etc/dovecot/dovecot-sql.conf.ext
-postconf -e "proxy_read_maps = \$local_recipient_maps, \$virtual_mailbox_maps, \$smtpd_sender_login_maps"
 echo "Mail transport config validation:"
 postfix check
 doveconf -n | head -100
+echo "Check generated Postfix sender mapping authorization:"
+postconf -h proxy_read_maps | grep -Fq "proxy:sqlite:/etc/postfix/sqlite-sender-login.cf"
 echo "Check actual Postfix SQLite recipient lookup:"
 test "$(postmap -q "local-delivery@$DOMAIN" sqlite:/etc/postfix/sqlite-virtual-mailboxes.cf)" = "local-delivery@$DOMAIN"
 echo "Check real Dovecot authentication:"
