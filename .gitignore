@@ -25,3 +25,14 @@ phone-data/
 **/turnserver.conf
 **/monico-ca.crt
 **/server.crt
+
+# Unified Linux service private credentials and mailbox state
+**/linux-config.json
+**/mcp.pid
+**/mcp.log
+**/calling-linux-labels.json
+**/agents.sqlite3
+**/agents.sqlite3-*
+**/maildir/
+**/maildirs/
+**/.venv/
