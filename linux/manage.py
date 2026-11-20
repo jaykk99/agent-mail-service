@@ -168,7 +168,9 @@ def start_mcp(config, folder):
     # Clear only stale PID metadata, never an actively running server.
     pid_file = _mcp_pid_path(folder)
     old_pid = _read_saved_mcp_pid(folder)
-    if pid_file.exists() and not (old_pid and _pid_active(old_pid, MAIL / "server.py")):
+    if old_pid and _pid_active(old_pid, MAIL / "server.py"):
+        raise RuntimeError("Saved MCP process is running but not healthy yet; inspect its log")
+    if pid_file.exists():
         pid_file.unlink()
     if _port_open(MCP_PORT):
         raise RuntimeError("127.0.0.1:8787 is occupied by another process; refusing to attach")
@@ -251,6 +253,13 @@ def stop_phone(state):
                             capture_output=True, text=True, timeout=15)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "Phone service stop failed")
+    deadline = time.monotonic() + 6
+    while time.monotonic() < deadline:
+        if not inspect_phone(state):
+            break
+        time.sleep(0.1)
+    if inspect_phone(state):
+        raise RuntimeError("Phone service shutdown incomplete; inspect before restarting")
     return result.stdout.strip()
 
 
