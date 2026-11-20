@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from urllib.error import URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "phone"))
 from public_gateway import ensure_tls
@@ -51,8 +52,9 @@ class PublicProbeTests(unittest.TestCase):
         self.assertEqual(report["authenticated_agent"], "2001")
 
     def test_03_bad_certificate_rejected(self):
-        with self.assertRaises(ssl.SSLError):
+        with self.assertRaises(URLError) as failure:
             run_probe(self.url, allow_loopback_for_tests=True)
+        self.assertIsInstance(failure.exception.reason, ssl.SSLCertVerificationError)
 
     def test_04_fail_closed_for_nonpublic_or_insecure_urls(self):
         for url in ("http://8.8.8.8:8766", "https://127.0.0.1:8766",
