@@ -86,6 +86,13 @@ class RegistryTests(unittest.TestCase):
             self.assertTrue(first["mail_password"])
         self.assertEqual(self.reg.mailbox_count(), 1000)
 
+    def test_domain_cannot_change_unintentionally(self):
+        self.reg.register("agent_001", "alice")
+        with self.assertRaisesRegex(RuntimeError, "Database belongs"):
+            Registry(self.tmp.name, "other-domain.net")
+        reopened = Registry(self.tmp.name, "mail.example.invalid")
+        self.assertEqual(reopened.mailbox_count(), 1)
+
     def test_missing_usb(self):
         with self.assertRaises(RuntimeError):
             Registry(self.tmp.name + "/missing", "example.invalid")
