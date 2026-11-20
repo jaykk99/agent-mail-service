@@ -57,9 +57,12 @@ def provision(state_dir, count=1000):
             identities[extension] = {
                 'agentId': f'agent-{index + 1:04d}',
                 'sipPassword': secrets.token_urlsafe(32),
+                'apiToken': secrets.token_urlsafe(32),
             }
         item = identities[extension]
-        if not isinstance(item, dict) or not item.get('agentId') or not item.get('sipPassword'):
+        if isinstance(item, dict) and not item.get('apiToken'):
+            item['apiToken'] = secrets.token_urlsafe(32)
+        if not isinstance(item, dict) or not item.get('agentId') or not item.get('sipPassword') or not item.get('apiToken'):
             raise ValueError(f'Incomplete identity at extension {extension}; refusing to rotate it')
     if any(int(ext) < BASE_EXTENSION or int(ext) >= BASE_EXTENSION + count for ext in identities):
         raise ValueError('Identity store contains extensions outside the selected range')
