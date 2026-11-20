@@ -100,7 +100,7 @@ class LinuxManagerTests(unittest.TestCase):
 
     def test_install_is_not_needed_for_phone_only_startup(self):
         content = (ROOT / "start.sh").read_text(encoding="utf-8")
-        self.assertIn('if [ "\${1-}" = "--full" ]', content)
+        self.assertIn('if [ "' + chr(36) + '{1-}" = "--full" ]', content)
         self.assertIn('exec python3 phone/start.py --daemon', content)
 
 
