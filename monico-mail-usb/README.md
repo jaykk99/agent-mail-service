@@ -42,6 +42,7 @@ From `agent-mail-service/monico-mail-usb`:
 
 ```bash
 export MONICO_DATA="/mnt/chromeos/removable/YOUR_DRIVE/monico"
+export MONICO_MCP_BEARER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 export MONICO_DOMAIN="mail.example.invalid"
 export MONICO_ADMIN_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 .venv/bin/python server.py
@@ -77,3 +78,9 @@ GitHub Actions also runs these tests on changes to this folder. These tests chec
 ## Security notes
 
 The admin key is currently passed as a tool argument and is **not suitable for exposure to remote/untrusted MCP clients**. Use the service only on the private Linux loopback interface. A production release needs authentication at the HTTP transport layer, secure onboarding, and audited mail delivery before publishing a URL.
+
+## MCP HTTP bearer security
+
+All MCP HTTP requests now require `Authorization: Bearer <MONICO_MCP_BEARER_TOKEN>`. Generate the separate bearer token as shown in step 3. Save it securely outside Git for later restarts. This is an operator-wide token, **not** an agent-specific token; never give it to untrusted agents. The admin registration tool also requires the separate `MONICO_ADMIN_KEY`.
+
+**Not ready for public exposure:** individual agent transport authorization, pairing, rate limiting, live SMTP/IMAP, and public HTTPS deployment are still unimplemented. The bearer authentication code has not yet passed an end-to-end FastMCP integration test.
