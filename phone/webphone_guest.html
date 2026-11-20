@@ -45,7 +45,7 @@ async function call(){try{
   if(!navigator.mediaDevices?.getUserMedia)throw Error('Microphone requires localhost or trusted HTTPS');
   stopCall();
   stream=await navigator.mediaDevices.getUserMedia({audio:true});
-  pc=new RTCPeerConnection({iceServers:[]});
+  const ice=await request('/api/turn',undefined,true);pc=new RTCPeerConnection({iceServers:ice.iceServers||[]});
   pc.ontrack=e=>{$('remote').srcObject=e.streams[0];$('remote').play().catch(()=>{})};
   pc.onicecandidate=e=>{if(e.candidate)request('/api/webphone/guest/signal',{type:'candidate',value:e.candidate.toJSON()},true).catch(err=>status('ICE error: '+err.message))};
   pc.onconnectionstatechange=()=>{if(pc)status('Call '+pc.connectionState)};
