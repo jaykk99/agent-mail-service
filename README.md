@@ -1,5 +1,34 @@
 # Agent Mail Service
 
+## Use the Calling-linux project
+
+I've integrated the **safe, self-hosted** parts of
+[jaykk99/Calling-linux](https://github.com/jaykk99/Calling-linux):
+fleet display labels from its 1,000 extensions and an actual SIP OPTIONS
+connectivity test. Monico retains its own permanent identities and credentials.
+
+```bash
+# Optional: separately clone your Calling-linux reference app
+git clone https://github.com/jaykk99/Calling-linux.git ~/Calling-linux
+
+# From inside ~/agent-mail-service, inspect then apply the label mapping:
+python3 phone/calling_linux_import.py \
+  --source "$HOME/Calling-linux/data/carrier-state.json"
+python3 phone/calling_linux_import.py \
+  --source "$HOME/Calling-linux/data/carrier-state.json" --apply
+
+# Verify a real local Asterisk/SIP server is responding:
+python3 phone/sip_probe.py --host 127.0.0.1 --port 5060
+```
+
+See [CALLING_LINUX_INTEGRATION.md](CALLING_LINUX_INTEGRATION.md)
+for prerequisites, safe migration, and limitations. Calling-linux's
+generated `+1 201-555-...` records are demonstration values;
+**they are not assigned public carrier numbers**. Public Monico browser
+access is a separate feature, explained below.
+
+---
+
 ## Public browser access (self-hosted Linux, no purchased domain)
 
 The Monico application can serve its **1,000 internal agent extensions**
