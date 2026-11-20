@@ -32,7 +32,7 @@ for(const config of configs){
       buttons:(await page.locator('button').allTextContents()).slice(0,30).map(v=>v.trim()).filter(Boolean),
     };
     await page.screenshot({path:'live-gameplay-artifacts/'+config.name+'-entry.png',fullPage:false});
-    let enterAttempted=false,entered=false,phoneOpened=false,computerOpened=false;
+    let enterAttempted=false,entered=false,phoneOpened=false,computerOpened=false,keyboardPhoneFallback=false,walkInputSent=false;
     const entryBtn=page.getByRole('button',{name:/enter.*city|enter.*world|start.*game|play/i}).first();
     const legacyGate=page.getByText(/(?:Click|Tap) anywhere to step inside/i).first();
     if(await entryBtn.count() || await legacyGate.count()){
@@ -43,6 +43,13 @@ for(const config of configs){
       entered=(await page.getByText(/(?:Click|Tap) anywhere to step inside/i).count())===0 &&
         (await page.locator('canvas').count())>0;
       await page.screenshot({path:'live-gameplay-artifacts/'+config.name+'-world.png'});
+      if(entered && config.name==='desktop'){
+        await page.keyboard.down('w');
+        await page.waitForTimeout(850);
+        await page.keyboard.up('w');
+        walkInputSent=true;
+        await page.screenshot({path:'live-gameplay-artifacts/'+config.name+'-walking.png'});
+      }
     }
     const computer=page.getByRole('button',{name:/open browserbro city computer/i}).first();
     if(await computer.count()){
@@ -54,12 +61,20 @@ for(const config of configs){
     }
     const phone=page.getByRole('button',{name:/open your phone/i}).first();
     if(await phone.count()){
-      await phone.click({timeout:12000}).catch(e=>errors.push('phone: '+String(e.message).slice(0,150)));
+      try {
+        await phone.click({timeout:4500});
+      } catch(error) {
+        if(config.name==='desktop'){
+          await page.keyboard.press('p');
+          keyboardPhoneFallback=true;
+        }else errors.push('phone: '+(error instanceof Error?error.message.slice(0,150):String(error)));
+      }
+      await page.waitForTimeout(650);
       phoneOpened=await page.getByText('Your Phone',{exact:false}).count()>0;
       await page.screenshot({path:'live-gameplay-artifacts/'+config.name+'-phone.png'});
     }
     results.push({device:config.name,first,enterAttempted,entered,
-      computerOpened,phoneOpened,errors,
+      computerOpened,phoneOpened,keyboardPhoneFallback,walkInputSent,errors,
       passed:first.status===200&&first.canvas>0&&enterAttempted&&entered&&phoneOpened});
     await context.close();
   }catch(error){
