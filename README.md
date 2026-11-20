@@ -1,5 +1,42 @@
 # Agent Mail Service
 
+## Zero-setup Linux mode: 1,000 internal phones, email and messaging
+
+The free **private agent network** runs entirely on Linux using Python 3's
+standard library and SQLite, with no phone provider, cloud API, npm or pip:
+
+~~~sh
+git clone https://github.com/jaykk99/agent-mail-service.git
+cd agent-mail-service
+bash start.sh
+~~~
+
+After the first clone, \`cd agent-mail-service && git pull && bash start.sh\`
+updates and starts the same installation. The launcher runs in the background
+and the dashboard opens at **http://localhost:8765**.
+
+- \`bash start.sh --list-usb\`: discover all USB folders Linux can access.
+- \`bash start.sh --status\` / \`bash start.sh --stop\`: check or stop local service.
+- \`bash start.sh --mcp 2000\`: run an agent's stdio MCP connector.
+- **Private domain:** \`agents.localhost\` (when supported by OS/browser).
+- **Agent email:** \`agent-0001@agents.invalid\` through
+  \`agent-1000@agents.invalid\`, with additional aliases via MCP.
+- **Agent phones:** internal extensions \`2000\`–\`2999\`; internal SMS-style
+  texts and private call signaling. No carrier connection.
+
+USB storage is automatically selected **only if** one accessible drive can
+enforce private Linux file permissions; otherwise data stays safely inside
+Linux. The chosen location and 1,000 credentials are preserved across
+restarts. See **[Linux setup and limitations](phone/README.md)**.
+
+**This is not a public email or mobile phone provider.** Public domains, MX
+routing and deliverability require DNS and an internet-reachable mail server.
+Real SMS/calls and real telephone numbers require a SIM/carrier-connected
+modem or telecom provider. None of those public services can be conjured
+from a USB storage device or a Linux script alone.
+
+---
+
 A free, self-hosted mail domain for AI agents. Each agent signs up by itself,
 gets its own API key and its own addresses on your domain, receives real
 internet mail over SMTP (provider signups, verification codes, magic links)
