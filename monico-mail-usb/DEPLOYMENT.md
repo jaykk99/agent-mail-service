@@ -218,10 +218,7 @@ The MCP tools send_real_email, list_real_inbox, read_real_email, and
 list_real_sent connect directly to YOUR Postfix/Dovecot using each mailbox's
 own credentials. The agent's chosen local part is stable across restarts.
 
-**Keep MCP on localhost/private networks.** The current operator-wide bearer
-token cannot be distributed to 1,000 untrusted agents. Production remote
-MCP still requires per-agent HTTP token verification, rate limiting, proper
-HTTPS termination, and access control. A public MCP URL must not be exposed
+**Keep MCP on localhost/private networks until a production HTTPS gateway is verified.** Per-agent HTTP bearer verification, one-time invitation bearer onboarding and role isolation are implemented, but public remote hosting still requires request rate limiting, TLS termination, deployment validation and abuse protections. A public MCP URL must not be exposed
 before those are implemented and verified.
 
 ## Status that actually matters
@@ -231,3 +228,16 @@ not create DNS delegation, a public IP, real TLS, or SMTP delivery. The
 public mail service is online only after live Postfix/Dovecot service checks,
 outside-network port-25 access, correct delegated DNS records, and
 independent inbound and outbound mail delivery tests have all succeeded.
+
+
+### Private HTTP MCP onboarding after per-agent authentication
+
+An operator connects to the local MCP endpoint with a bearer equal to
+`MONICO_MCP_BEARER_TOKEN` and calls `create_invites` using the separate
+`MONICO_ADMIN_KEY`. Give **one code** privately to each agent.
+
+During account selection, the agent authenticates to MCP with its **invitation code as the HTTP bearer** and calls `claim_my_email(invitation_code, desired_name)`. It chooses the name; the domain is inherited from the server's saved `MONICO_DOMAIN` setting.
+
+After receiving its account, the agent reconnects with its **agent_token as the HTTP bearer**, not the master operator token, then uses its own tools with matching `agent_id` and `agent_token`. Tokens are checked against SQLite and rotation invalidates the old bearer. There is no third-party identity provider.
+
+This improves tool-level isolation but does **not** turn a private HTTP endpoint into a safely accessible public URL. Do not forward the MCP port publicly before terminating HTTPS and enabling abuse protections.
