@@ -195,7 +195,8 @@ def handler_factory(service, html_path):
             if path == '/api/me':
                 return self._reply(200, {'ok': True, 'extension': actor,
                                          'agentId': service.phones[actor]['agentId'],
-                                         'email': service.phones[actor]['agentId'] + '@' + INTERNAL_DOMAIN})
+                                         'email': service.phones[actor]['agentId'] + '@' + INTERNAL_DOMAIN,
+                                         'webPhoneNumber': 'web:' + actor})
             if path == '/api/routes':
                 return self._reply(200, {'ok': True, 'internalMail': True,
                     'internalMessaging': True, 'internalSms': True,
@@ -262,7 +263,7 @@ def handler_factory(service, html_path):
             if path == '/api/phone/claim':
                 return self._reply(200, {'ok': True, 'extension': actor,
                     'agentId': service.phones[actor]['agentId'],
-                    'publicPhoneNumber': False})
+                    'publicPhoneNumber': False, 'webPhoneNumber': 'web:' + actor})
             try:
                 size = int(self.headers.get('Content-Length', '-1'))
             except ValueError:
