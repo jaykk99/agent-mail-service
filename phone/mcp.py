@@ -59,6 +59,11 @@ TOOLS = [
          'to': {'type': 'string'}, 'text': {'type': 'string'}}, 'required': ['to', 'text']}},
     {'name': 'phone_inbox', 'description': 'Read new internal messages for this agent.',
      'inputSchema': {'type': 'object', 'properties': {'after': {'type': 'integer', 'minimum': 0}}}},
+    {'name': 'sms_send_internal', 'description': 'Send SMS-style text to another INTERNAL agent extension. Not carrier SMS.',
+     'inputSchema': {'type': 'object', 'properties': {
+         'to': {'type': 'string'}, 'text': {'type': 'string'}}, 'required': ['to', 'text']}},
+    {'name': 'sms_inbox_internal', 'description': 'Read internal SMS-style texts. Does NOT receive ordinary mobile SMS.',
+     'inputSchema': {'type': 'object', 'properties': {'after': {'type': 'integer', 'minimum': 0}}}},
     {'name': 'phone_call_signals', 'description': 'Read peer-to-peer call signaling events for this agent.',
      'inputSchema': {'type': 'object', 'properties': {'after': {'type': 'integer', 'minimum': 0}}}},
     {'name': 'phone_send_call_signal', 'description': 'Send WebRTC call signaling only, not audio.',
@@ -94,6 +99,10 @@ def execute(name, args):
         return request('/api/messages', {'to': args['to'], 'text': args['text']})
     if name == 'phone_inbox':
         return request('/api/messages?' + urlencode({'after': args.get('after', 0)}))
+    if name == 'sms_send_internal':
+        return request('/api/sms/send', {'to': args['to'], 'text': args['text']})
+    if name == 'sms_inbox_internal':
+        return request('/api/sms/inbox?' + urlencode({'after': args.get('after', 0)}))
     if name == 'phone_call_signals':
         return request('/api/signals?' + urlencode({'after': args.get('after', 0)}))
     if name == 'phone_send_call_signal':
