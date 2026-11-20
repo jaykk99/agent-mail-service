@@ -155,14 +155,28 @@ python3 selfhost/prepare_live.py \
   --vmail-uid "$(id -u vmail)" --vmail-gid "$(id -g vmail)" \
   --cert "/absolute/path/to/fullchain.pem" \
   --key "/absolute/path/to/privkey.pem" \
-  --dkim-public-txt ".generated/dkim/mail.txt"
+  --dkim-public-txt ".generated/dkim/mail.txt" \
+  --mcp-cert "/absolute/path/to/mcp-fullchain.pem" \
+  --mcp-key "/absolute/path/to/mcp-privkey.pem"
 ```
 
 The staged output in .generated/live-stage includes an explicit
-STAGED_NOT_DEPLOYED manifest. No system mail config is overwritten.
+STAGED_NOT_DEPLOYED manifest. If --mcp-cert and --mcp-key are supplied, the
+output also includes an Nginx HTTPS reverse proxy config for mcp.<domain>
+that passes the agent-specific bearer to the localhost FastMCP server and
+rate-limits requests per client IP. No system mail config is overwritten.
 Review and install the files with correct path, permission, and service
 version handling. Add account-level abuse/spam limits, mail quotas,
 monitoring, and backup before exposing services.
+
+The MCP certificate must cover **mcp.<your-domain>**, not merely mail.<your-domain>.
+The two certificate/key pairs may be the same only if that certificate really
+contains both hostnames (or an appropriate wildcard). To use the HTTPS proxy,
+install native Nginx on the Linux server, review the staged site configuration,
+then enable it with the correct certificate path. Test it with `sudo nginx -t`
+before reloading. It is not automatically enabled. The `mcp` DNS A record
+is generated with the mail IP by default; use separate IPs if your topology
+requires it. Avoid exposing the underlying localhost-only MCP port.
 
 ## Step 6 — Verify the running services
 
