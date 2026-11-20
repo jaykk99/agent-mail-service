@@ -78,7 +78,13 @@ async function main() {
     assert.equal(health.durableStorage, false);
     assert.equal(health.smtpListenerEnabled, false);
     assert.equal(health.externalEmailVerified, false);
-    console.log('PASS: real Node HTTP startup, honest ephemeral storage and mail status');
+    const readinessResponse = await fetch('http://127.0.0.1:' + apiPort + '/ready');
+    assert.equal(readinessResponse.status, 503, 'Ephemeral storage cannot pass readiness');
+    const readiness = await readinessResponse.json();
+    assert.equal(readiness.ok, false);
+    assert.ok(readiness.issues.includes('persistent_storage_not_configured'));
+    assert.equal(readiness.internetEmailDeliveryVerified, false);
+    console.log('PASS: real Node HTTP startup and fail-closed persistence readiness');
 
     assert.equal(await isListening(smtpPort), false,
       'Render HTTP-only mode opened an SMTP listener');
