@@ -12,6 +12,10 @@ on:
   push:
     paths:
       - 'phone/**'
+      - 'linux/**'
+      - 'monico-mail-usb/**'
+      - 'test/test_linux*.py'
+      - 'start.sh'
       - 'test/test_phone*.py'
       - '.github/workflows/agent-phone.yml'
 permissions:
@@ -27,6 +31,7 @@ jobs:
           python3 --version
           python3 -m py_compile phone/provision.py phone/server.py phone/mcp.py phone/start.py phone/internal_mail.py phone/usb_storage.py phone/webphone.py linux/manage.py
           sh -n start.sh
+          bash -n linux/install.sh
           python3 -m unittest discover -s test -p 'test_phone*.py' -v
           python3 -m unittest discover -s test -p 'test_linux*.py' -v
       - name: Parse browser JavaScript syntax (CI only)
