@@ -16,6 +16,8 @@ class Registry:
         self.directory = Path(directory).resolve()
         if not self.directory.is_dir():
             raise RuntimeError("USB data directory missing; refusing to use internal disk")
+        if not isinstance(domain, str) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{2,252}", domain):
+            raise ValueError("Invalid mailbox domain")
         self.domain = domain
         self.db = self.directory / "agents.sqlite3"
         with self.connect() as c:
@@ -25,6 +27,22 @@ class Registry:
                 token_hash TEXT NOT NULL,
                 created INTEGER NOT NULL
             )""")
+            c.execute("""CREATE TABLE IF NOT EXISTS config (
+                name TEXT PRIMARY KEY, value TEXT NOT NULL
+            )""")
+            stored = c.execute("SELECT value FROM config WHERE name='domain'").fetchone()
+            if stored:
+                if stored[0] != domain:
+                    raise RuntimeError(
+                        f"Database belongs to domain {stored[0]}, not {domain}. "
+                        "Refusing silent email address changes.")
+            else:
+                # Existing installs may have accounts predating domain locking.
+                domains = {email.rsplit("@", 1)[-1] for (email,) in
+                           c.execute("SELECT email FROM agents")}
+                if domains and domains != {domain}:
+                    raise RuntimeError("Existing account domains do not match MONICO_DOMAIN")
+                c.execute("INSERT INTO config(name,value) VALUES ('domain',?)", (domain,))
             c.execute("""CREATE TABLE IF NOT EXISTS mail_accounts (
                 email TEXT PRIMARY KEY,
                 password_hash TEXT NOT NULL,
