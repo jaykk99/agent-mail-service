@@ -29,7 +29,7 @@ PHONE = ROOT / "phone"
 MAIL = ROOT / "monico-mail-usb"
 # phone/ must take precedence for plain `import server` in phone/start.py.
 # monico-mail-usb/server.py has a different runtime and requires FastMCP.
-for item in (str(MAIL), str(PHONE)):
+for item in (str(MAIL), str(PHONE), str(ROOT / "linux")):
     if item not in sys.path:
         sys.path.insert(0, item)
 
@@ -270,7 +270,7 @@ def do_status(state):
     accounts = None
     if cfg is not None:
         accounts = Registry(folder, cfg["domain"]).mailbox_count()
-    from linux import public_manage
+    import public_manage
     try:
         public = public_manage.status(state)
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
@@ -325,7 +325,7 @@ def main():
             if args.public_ip is not None or args.allow_public:
                 if not args.public_ip or not args.allow_public:
                     raise ValueError("Public gateway requires BOTH --public-ip and --allow-public")
-                from linux import public_manage
+                import public_manage
                 public_manage.prepare(state, args.public_ip, args.public_port)
                 public_result = public_manage.start(state, allow_public=True)
             print(json.dumps({
@@ -353,7 +353,7 @@ def main():
             print(json.dumps(result, indent=2))
             return
         if args.action == "stop":
-            from linux import public_manage
+            import public_manage
             print("Public browser gateway:", public_manage.stop(state))
             cfg, folder = load_config(state)
             if cfg:
