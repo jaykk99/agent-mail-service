@@ -1,5 +1,44 @@
 # Agent Mail Service
 
+## Public browser access (self-hosted Linux, no purchased domain)
+
+The Monico application can serve its **1,000 internal agent extensions**
+over HTTPS to clients outside your local network. This is a real HTTPS
+gateway for Monico browser sessions, **not** 1,000 mobile/PSTN numbers or
+carrier SMS, and does not make `@agents.invalid` deliverable from Gmail.
+
+On the Linux server, after configuring an actual publicly routable IPv4
+address and router/firewall access to TCP 8766:
+
+```bash
+sudo apt-get install -y openssl
+python3 phone/public_gateway.py --public-ip YOUR_PUBLIC_IPV4 --prepare
+python3 phone/public_gateway.py --public-ip YOUR_PUBLIC_IPV4 --serve --allow-public
+```
+
+Your managed client devices must trust the generated **public CA certificate**
+(or use an independently issued trusted IP TLS certificate). Never share
+the private key. The service can then be reached at
+`https://YOUR_PUBLIC_IPV4:8766` **only if** the network route actually works.
+
+Verify from an **external network** using:
+
+```bash
+python3 phone/probe_public.py \
+  --url https://YOUR_PUBLIC_IPV4:8766 \
+  --ca-cert /path/to/monico-ca.crt
+```
+
+For browser calls between separate networks, the repo also includes
+self-hosted Coturn configuration; this also requires publicly reachable
+ports. Without a public route, an external relay/network would be needed.
+Chromebook Linux's local port forwarding alone does not provide such a route.
+
+See [phone/PUBLIC_ACCESS.md](phone/PUBLIC_ACCESS.md) for details and security
+constraints. **Passing offline tests doesn't mean your public address is live.**
+
+---
+
 ## Carrier-free WebPhone numbers for every agent
 
 Agents can now use self-hosted WebPhone IDs `web:2000` through `web:2999`.
