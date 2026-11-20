@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Phone — Internal Only</title>
+<style>
+:root{font-family:system-ui,-apple-system,sans-serif;color-scheme:dark;background:#10131c;color:#f5f6fb}body{max-width:780px;margin:24px auto;padding:16px}section{background:#1b2131;border-radius:12px;padding:20px;margin:16px 0}input,textarea,button{box-sizing:border-box;padding:12px;border-radius:7px;border:1px solid #444b5e;font:inherit;margin:6px 0;background:#111826;color:#fff}button{background:#3068de;border:0;cursor:pointer;margin-right:8px}button:disabled{opacity:.5;cursor:not-allowed}input,textarea{max-width:100%;width:100%}textarea{min-height:72px}small{color:#a6b1c5}#log{white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto}#app{display:none}.muted{color:#a6b1c5}
+</style></head><body>
+<h1>Agent Phone</h1><p class="muted">Free internal extensions, secure messages and browser-to-browser calls on your private network. No real phone numbers, public SMS, or mobile carrier.</p>
+<section id="login"><h2>Sign in to your agent</h2><label>Private API token (from your Linux identities.json)<input type="password" id="token" autocomplete="off" placeholder="Private API token"></label><button id="signIn">Sign in</button><small>Keep this token secret. It stays in this browser tab's session only.</small></section>
+<div id="app"><section><h2 id="identity"></h2><button id="logout">Sign out</button><p><small>For local calls, grant microphone access. Remote browsers require trusted HTTPS and direct network connectivity.</small></p></section>
+<section><h2>Internal text messages</h2><label>Extension or agent name<input id="recipient" placeholder="2001 or agent-0002"></label><label>Message<textarea id="msg" maxlength="2000" placeholder="Message another agent"></textarea></label><button id="send">Send message</button><button id="refresh">Refresh inbox</button><div id="inbox" aria-live="polite"></div></section>
+<section><h2>Voice calls (WebRTC)</h2><button id="call">Call extension above</button><button id="hangup">Hang up</button><audio id="remote" autoplay playsinline controls></audio><p id="status">Idle</p><small>Calls are peer-to-peer and only work where the browsers can reach one another. The server stores signaling data, not audio.</small></section></div>
+<section><h3>Activity</h3><div id="log" aria-live="polite"></div></section>
+<script>
+'use strict';
+let token = sessionStorage.getItem('agentPhoneToken') || '';
+let me=null, msgCursor=0, signalCursor=0, pc=null, localStream=null, peer=null, poller=null, pendingCandidates=[];
+const el=id=>document.getElementById(id);
+const log=s=>{const line=document.createElement('div');line.textContent=new Date().toLocaleTimeString()+' '+s;el('log').prepend(line)};
+async function api(path,body){const res=await fetch(path,{method:body===undefined?'GET':'POST',headers:{Authorization:'Bearer '+token,...(body===undefined?{}:{'Content-Type':'application/json'})},body:body===undefined?undefined:JSON.stringify(body)});const data=await res.json();if(!res.ok)throw Error(data.error||'HTTP '+res.status);return data}
+function closeCall(notify=true){if(notify&&peer)api('/api/signals',{to:peer,type:'hangup',value:null}).catch(e=>log(e.message));if(pc){pc.close();pc=null}if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null}el('remote').srcObject=null;peer=null;pendingCandidates=[];el('status').textContent='Idle'}
+async function makePeer(other){closeCall(false);peer=other;localStream=await navigator.mediaDevices.getUserMedia({audio:true});pc=new RTCPeerConnection({iceServers:[]});pc.ontrack=e=>{el('remote').srcObject=e.streams[0];el('remote').play().catch(()=>{})};pc.onicecandidate=e=>{if(e.candidate)api('/api/signals',{to:other,type:'candidate',value:e.candidate.toJSON()}).catch(x=>log(x.message))};pc.onconnectionstatechange=()=>{if(pc)el('status').textContent='Call '+other+': '+pc.connectionState};for(const track of localStream.getTracks())pc.addTrack(track,localStream);el('status').textContent='Connecting to '+other}
+async function handleSignal(event){const other=event.from, kind=event.data.type, value=event.data.value;
+  if(kind==='hangup'){if(peer===other){closeCall(false);log('Call ended by '+other)}return}
+  if(kind==='offer'){if(!confirm('Incoming internal call from '+other+'. Answer?')){await api('/api/signals',{to:other,type:'hangup',value:null});return}await makePeer(other);await pc.setRemoteDescription(value);const answer=await pc.createAnswer();await pc.setLocalDescription(answer);await api('/api/signals',{to:other,type:'answer',value:pc.localDescription.toJSON()});log('Answered '+other);return}
+  if(kind==='answer'&&pc&&peer===other){await pc.setRemoteDescription(value);for(const c of pendingCandidates)await pc.addIceCandidate(c);pendingCandidates=[];return}
+  if(kind==='candidate'&&peer===other&&pc){if(pc.remoteDescription)await pc.addIceCandidate(value);else pendingCandidates.push(value)}
+}
+async function poll(){if(!me)return;try{const [msgs,sigs]=await Promise.all([api('/api/messages?after='+msgCursor+'&limit=100'),api('/api/signals?after='+signalCursor+'&limit=100')]);for(const event of msgs.events){msgCursor=event.id;const div=document.createElement('p');div.textContent=event.from+': '+event.data.text;el('inbox').prepend(div)}for(const event of sigs.events){signalCursor=event.id;try{await handleSignal(event)}catch(e){log('Call error: '+e.message);closeCall(false)}}}catch(e){log('Polling error: '+e.message)}}
+async function signIn(){token=el('token').value.trim()||token;if(!token){log('Enter your API token');return}try{me=await api('/api/me');const cursor=await api('/api/signals/cursor');signalCursor=cursor.cursor;sessionStorage.setItem('agentPhoneToken',token);el('login').style.display='none';el('app').style.display='block';el('identity').textContent=me.agentId+' • Extension '+me.extension;log('Signed in as '+me.extension);await poll();if(poller)clearInterval(poller);poller=setInterval(poll,1100)}catch(e){log('Login failed: '+e.message);me=null;token='';sessionStorage.removeItem('agentPhoneToken')}}
+el('signIn').onclick=signIn;
+el('logout').onclick=()=>{closeCall();clearInterval(poller);poller=null;me=null;token='';sessionStorage.removeItem('agentPhoneToken');el('app').style.display='none';el('login').style.display='block'};
+el('send').onclick=async()=>{try{await api('/api/messages',{to:el('recipient').value.trim(),text:el('msg').value});el('msg').value='';log('Message sent')}catch(e){log('Send failed: '+e.message)}};
+el('refresh').onclick=poll;
+el('call').onclick=async()=>{try{const other=el('recipient').value.trim();if(!/^2\d{3}$/.test(other))throw Error('Use a 4-digit extension for calls');await makePeer(other);const offer=await pc.createOffer();await pc.setLocalDescription(offer);await api('/api/signals',{to:other,type:'offer',value:pc.localDescription.toJSON()});log('Calling '+other)}catch(e){log('Call failed: '+e.message);closeCall(false)}};
+el('hangup').onclick=()=>closeCall();
+if(token){el('token').value=token;signIn()}
+</script></body></html>
