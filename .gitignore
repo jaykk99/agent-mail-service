@@ -15,3 +15,13 @@ phone-data/
 # Self-hosted Linux server process files
 **/server.pid
 **/server.log
+
+# Never commit locally generated public gateway or TURN relay secrets
+.generated/
+**/.generated/
+**/public-tls/
+**/monico-ca.key
+**/server.key
+**/turnserver.conf
+**/monico-ca.crt
+**/server.crt
