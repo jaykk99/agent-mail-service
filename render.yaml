@@ -6,6 +6,9 @@ services:
     buildCommand: npm ci --omit=dev
     startCommand: node server.js
     healthCheckPath: /health
+    # This HTTP service alone cannot accept public SMTP nor keep Free-plan
+    # filesystem data permanently. For durable email use Monico Linux
+    # Postfix/Dovecot, or configure a remote persistent DB separately.
     envVars:
       # Render sets PORT automatically. Do not create an empty PORT variable.
       # Render exposes HTTP only. This legacy API accepts inbound mail via
@@ -19,9 +22,9 @@ services:
       - key: SMTP_HOST
         value: "127.0.0.1"
       - key: AGENT_MAIL_TOKEN
-        sync: false # set a long random token in the Render dashboard
+        generateValue: true # strong operator key on FIRST deployment; never log or commit
       - key: AGENT_MAIL_INBOUND_SECRET
-        sync: false # same value as AGENT_MAIL_INBOUND_SECRET on error-inbox and INBOUND_SECRET on the Cloudflare Email Worker
+        generateValue: true # copy privately to the OPTIONAL inbound worker as INBOUND_SECRET
       - key: MAIL_DOMAIN
         sync: false # NOTE: Render cannot receive SMTP; for real mail use docker-compose.yml (see README)
       - key: SUPABASE_URL
