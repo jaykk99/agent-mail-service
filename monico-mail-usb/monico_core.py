@@ -95,6 +95,29 @@ class Registry:
         return {"email": email, "agent_id": agent_id, "token": token,
                 "mail_password": mail_password, "existing": False}
 
+    def provision_system_mailbox(self, local_name):
+        """Locally provision mandatory abuse/postmaster inboxes, not claimable by agents."""
+        if local_name not in ("postmaster", "abuse"):
+            raise ValueError("Only postmaster and abuse may be provisioned as system inboxes")
+        agent_id = "system_" + local_name
+        email = f"{local_name}@{self.domain}"
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM agents WHERE email=?", (email,)).fetchone():
+                return {"email": email, "agent_id": agent_id, "existing": True}
+            count = db.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
+            if count >= self.capacity:
+                raise ValueError("Mailbox capacity reached")
+            agent_token = secrets.token_urlsafe(32)
+            mail_password = secrets.token_urlsafe(32)
+            now = int(time.time())
+            db.execute("INSERT INTO agents(agent_id,email,token_hash,created) VALUES(?,?,?,?)",
+                       (agent_id, email, self.hash_token(agent_token), now))
+            db.execute("INSERT INTO mail_accounts(email,password_hash,created) VALUES(?,?,?)",
+                       (email, self.hash_token(mail_password), now))
+        return {"email": email, "agent_id": agent_id, "token": agent_token,
+                "mail_password": mail_password, "existing": False}
+
     def get_email(self, agent_id, token):
         if not token or not agent_id:
             raise ValueError("Unauthorized")
