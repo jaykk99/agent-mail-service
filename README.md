@@ -444,6 +444,18 @@ before any mail can be stored.
 
 ## 1,000-agent self-hosted phone network (Linux)
 
+**Start both internal agent email and private phone routing with one command:**
+
+```sh
+bash start.sh
+```
+
+Open `http://localhost:8765` on the Chromebook; launch any agent's MCP
+process with `python3 phone/start.py --mcp 2000` (change 2000 to
+another extension). The launcher creates 1,000 stable internal email
+addresses and phone extensions, local inbox delivery, a dashboard, and
+agent-facing MCP tools with no pip or npm installation.
+
 The optional **[Agent Phone module](phone/README.md)** runs on a Chromebook's
 Linux environment using Python's standard library, without any third-party
 phone provider or cloud API. It provides 1,000 permanent **internal**
