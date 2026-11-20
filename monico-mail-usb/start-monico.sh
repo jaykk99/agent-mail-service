@@ -5,6 +5,9 @@ cd "$(dirname "$0")"
 if [[ -z "${MONICO_DOMAIN:-}" && -f "$HOME/.config/monico-mail/domain.env" ]]; then
   source "$HOME/.config/monico-mail/domain.env"
 fi
+if [[ -z "${MONICO_DATA:-}" && -f "$HOME/.config/monico-mail/storage.env" ]]; then
+  source "$HOME/.config/monico-mail/storage.env"
+fi
 : "${MONICO_ADMIN_KEY:?Set a strong MONICO_ADMIN_KEY locally}"
 : "${MONICO_MCP_BEARER_TOKEN:?Set a separate strong MONICO_MCP_BEARER_TOKEN locally}"
 if [[ "${#MONICO_ADMIN_KEY}" -lt 32 || "${#MONICO_MCP_BEARER_TOKEN}" -lt 32 ]]; then
