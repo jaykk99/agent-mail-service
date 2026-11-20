@@ -50,6 +50,34 @@ class LocalMailRouter:
         db.execute('PRAGMA busy_timeout=10000')
         return db
 
+    def has_address(self, address):
+        with self.connection() as db:
+            return db.execute('SELECT 1 FROM local_mailboxes WHERE address=?',
+                              (address,)).fetchone() is not None
+
+    def deliver_inbound(self, envelope_sender, recipient, subject, body):
+        """Accept pre-routed SMTP mail for a LOCAL mailbox only.
+
+        A remote envelope sender does not own an agent's From address, so
+        this path is intentionally separate from authenticated local sends.
+        Never forward to arbitrary recipient domains.
+        """
+        if not isinstance(envelope_sender, str) or len(envelope_sender) > 254:
+            raise MailError('Invalid envelope sender')
+        if not isinstance(recipient, str) or not recipient.endswith('@' + INTERNAL_DOMAIN):
+            raise MailError('Recipient is not an internal mailbox', 550)
+        if not isinstance(subject, str) or len(subject) > 200:
+            raise MailError('Invalid subject')
+        if not isinstance(body, str) or not (1 <= len(body) <= 10000):
+            raise MailError('Invalid text body')
+        with self.connection() as db:
+            if not db.execute('SELECT 1 FROM local_mailboxes WHERE address=?',
+                              (recipient,)).fetchone():
+                raise MailError('Unknown internal mailbox', 550)
+            cur = db.execute('INSERT INTO local_emails(sender,recipient,subject,body) VALUES (?,?,?,?)',
+                             (envelope_sender, recipient, subject, body))
+            return cur.lastrowid
+
     def addresses(self, owner):
         with self.connection() as db:
             return [r[0] for r in db.execute(
