@@ -1,4 +1,4 @@
-"""Persistent mailbox identity registry; no public email transport."""
+"""Self-hosted mailbox identity and credentials; public SMTP deployment is separate."""
 import hashlib
 import hmac
 import re
@@ -25,6 +25,11 @@ class Registry:
                 token_hash TEXT NOT NULL,
                 created INTEGER NOT NULL
             )""")
+            c.execute("""CREATE TABLE IF NOT EXISTS mail_accounts (
+                email TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                created INTEGER NOT NULL
+            )""")
             c.execute("""CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, created INTEGER NOT NULL)""")
 
     def connect(self):
@@ -46,13 +51,17 @@ class Registry:
             if old:
                 return {"email": old[0], "agent_id": agent_id, "existing": True}
             token = secrets.token_urlsafe(32)
+            mail_password = secrets.token_urlsafe(32)
             email = f"{desired_name}@{self.domain}"
             try:
                 c.execute("INSERT INTO agents VALUES (?,?,?,?)",
                           (agent_id, email, self.hash_token(token), int(time.time())))
+                c.execute("INSERT INTO mail_accounts VALUES (?,?,?)",
+                          (email, self.hash_token(mail_password), int(time.time())))
             except sqlite3.IntegrityError as e:
                 raise ValueError("Email name already claimed") from e
-        return {"email": email, "agent_id": agent_id, "token": token, "existing": False}
+        return {"email": email, "agent_id": agent_id, "token": token,
+                "mail_password": mail_password, "existing": False}
 
     def get_email(self, agent_id, token):
         if not token or not agent_id:
@@ -106,3 +115,17 @@ class Registry:
         if not row:
             raise ValueError("Message not found")
         return dict(zip(("id", "from", "to", "subject", "body", "created"), row))
+
+    def rotate_mail_password(self, agent_id, token):
+        """Issue a fresh independent IMAP/SMTP password; shown only once."""
+        email = self.get_email(agent_id, token)
+        password = secrets.token_urlsafe(32)
+        with self.connect() as c:
+            c.execute("""INSERT INTO mail_accounts(email,password_hash,created) VALUES (?,?,?)
+                         ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash,
+                         created=excluded.created""", (email, self.hash_token(password), int(time.time())))
+        return {"email": email, "mail_password": password}
+
+    def mailbox_count(self):
+        with self.connect() as c:
+            return c.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
