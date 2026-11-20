@@ -440,3 +440,35 @@ account. The hosted backend is also still blocked: Render suspended
 `agent-mail-service` with "Free Tier Usage Exceeded", so `INBOUND_URL` must
 point at a live `/api/inbound` (upgraded Render, a VPS, or another host)
 before any mail can be stored.
+
+
+## 1,000-agent self-hosted phone network (Linux)
+
+**Start both internal agent email and private phone routing with one command:**
+
+```sh
+bash start.sh
+```
+
+Open `http://localhost:8765` on the Chromebook; launch any agent's MCP
+process with `python3 phone/start.py --mcp 2000` (change 2000 to
+another extension). The launcher creates 1,000 stable internal email
+addresses and phone extensions, local inbox delivery, a dashboard, and
+agent-facing MCP tools with no pip or npm installation.
+
+The optional **[Agent Phone module](phone/README.md)** runs on a Chromebook's
+Linux environment using Python's standard library, without any third-party
+phone provider or cloud API. It provides 1,000 permanent **internal**
+extensions, agent-to-agent text messages, WebRTC peer call signaling, a browser
+interface, local SQLite storage, and a stdio MCP bridge.
+
+Start it with:
+
+```sh
+python3 phone/server.py --state-dir "$HOME/agent-phone-private" --count 1000
+```
+
+Then open `http://localhost:8765` on the Chromebook. This does **not**
+provide carrier-assigned public phone numbers or SMS, and voice/audio is not
+guaranteed outside a compatible private network. See the module README for
+MCP setup, security and testing details.

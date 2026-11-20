@@ -2,3 +2,12 @@ node_modules
 .env
 
 .wrangler/
+
+# Never commit SIP passwords or generated extension configs.
+phone-data/
+**/identities.json
+**/pjsip_agents.conf
+**/extensions_agents.conf
+**/messages.sqlite3
+**/messages.sqlite3-*
+**/__pycache__/
