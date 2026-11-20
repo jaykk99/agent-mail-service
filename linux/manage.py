@@ -27,7 +27,9 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 PHONE = ROOT / "phone"
 MAIL = ROOT / "monico-mail-usb"
-for item in (str(PHONE), str(MAIL)):
+# phone/ must take precedence for plain `import server` in phone/start.py.
+# monico-mail-usb/server.py has a different runtime and requires FastMCP.
+for item in (str(MAIL), str(PHONE)):
     if item not in sys.path:
         sys.path.insert(0, item)
 
