@@ -5,6 +5,7 @@ from pathlib import Path
 from fastmcp import FastMCP
 from fastmcp.server.auth import StaticTokenVerifier
 from monico_core import Registry
+from mailbox_claims import MailboxClaims
 from selfhost.mail_client import SelfHostedMail
 
 ADMIN_KEY = os.environ.get("MONICO_ADMIN_KEY")
@@ -13,6 +14,7 @@ if not ADMIN_KEY or len(ADMIN_KEY) < 32:
 DATA = Path(os.environ.get("MONICO_DATA", "/mnt/monico"))
 DOMAIN = os.environ.get("MONICO_DOMAIN", "mail.example.invalid")
 registry = Registry(DATA, DOMAIN)
+claims = MailboxClaims(registry, capacity=int(os.environ.get("MONICO_MAX_MAILBOXES", "1000")))
 self_hosted_mail = SelfHostedMail(registry, os.environ["MONICO_MAIL_HOST"]) if os.environ.get("MONICO_MAIL_HOST") else None
 # Transport-level protection is mandatory even on localhost. Use a separate
 # secret from the admin provisioning key, and never commit either secret.
@@ -30,6 +32,30 @@ def register_agent(admin_key: str, agent_id: str, desired_name: str) -> dict:
     if not hmac.compare_digest(admin_key, ADMIN_KEY):
         raise ValueError("Unauthorized")
     return registry.register(agent_id, desired_name)
+
+@mcp.tool()
+def create_invites(admin_key: str, count: int = 1, valid_days: int = 7) -> dict:
+    """Admin-only: generate single-use invites. Agents choose their own email names."""
+    if not hmac.compare_digest(admin_key, ADMIN_KEY):
+        raise ValueError("Unauthorized")
+    return claims.issue_invites(count, valid_days)
+
+@mcp.tool()
+def check_email_name(desired_name: str) -> dict:
+    """Check whether an email name is available on the configured Monico domain."""
+    return claims.name_available(desired_name)
+
+@mcp.tool()
+def claim_my_email(invitation_code: str, desired_name: str) -> dict:
+    """Choose your own unique email name using a one-time invitation."""
+    return claims.claim(invitation_code, desired_name)
+
+@mcp.tool()
+def get_domain_info(admin_key: str) -> dict:
+    """Admin-only: current domain, used mailboxes, pending invitations and capacity."""
+    if not hmac.compare_digest(admin_key, ADMIN_KEY):
+        raise ValueError("Unauthorized")
+    return claims.slots()
 
 @mcp.tool()
 def get_my_email(agent_id: str, agent_token: str) -> str:
