@@ -56,7 +56,7 @@ def render_service(python_path, repo, state_dir=None, public_ip=None, allow_publ
         "StartLimitBurst=5\n\n"
         "[Service]\n"
         "Type=simple\n"
-        "WorkingDirectory=" + _quote(repo) + "\n"
+        "WorkingDirectory=" + str(repo).replace("%", "%%") + "\n"
         "ExecStart=" + " ".join(_quote(arg) for arg in cmd) + "\n"
         "Restart=on-failure\n"
         "RestartSec=15\n"
