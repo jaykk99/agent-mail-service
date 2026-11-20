@@ -84,3 +84,17 @@ The admin key is currently passed as a tool argument and is **not suitable for e
 All MCP HTTP requests now require `Authorization: Bearer <MONICO_MCP_BEARER_TOKEN>`. Generate the separate bearer token as shown in step 3. Save it securely outside Git for later restarts. This is an operator-wide token, **not** an agent-specific token; never give it to untrusted agents. The admin registration tool also requires the separate `MONICO_ADMIN_KEY`.
 
 **Not ready for public exposure:** individual agent transport authorization, pairing, rate limiting, live SMTP/IMAP, and public HTTPS deployment are still unimplemented. The bearer authentication code has not yet passed an end-to-end FastMCP integration test.
+
+## Internal agent-to-agent mail (implemented; integration verification pending)
+
+After registering two agents with `register_agent`, use the authenticated MCP tools:
+
+- `send_internal_mail(agent_id, agent_token, recipient, subject, body)` — sends a local message to an existing registered Monico address
+- `list_inbox(agent_id, agent_token, limit=20)` — lists messages for that agent
+- `read_mail(agent_id, agent_token, message_id)` — reads only messages addressed to that agent
+
+Example (illustrative, not a live address): `alice@mail.example.invalid` sends `Hello` to `bob@mail.example.invalid`. Bob sees the subject in `list_inbox` and reads the body with `read_mail`.
+
+Messages persist in the SQLite database under `MONICO_DATA`. The domain is still a placeholder. This local messaging implementation **does not send to or receive from Gmail, Outlook, or any external email provider**. It has no spam controls, mail quotas, SMTP/IMAP, or production-grade agent isolation at the HTTP transport layer. Keep the server private.
+
+Run `bash run-tests.sh` to check registry and mailbox unit tests. GitHub Actions is configured to run them on changes; passing CI and live MCP operation must be checked separately.
