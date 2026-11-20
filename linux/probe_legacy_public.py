@@ -16,7 +16,7 @@ import urllib.request
 
 HOST = "https://agent-mail-service.onrender.com"
 TIMEOUT = 18
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = 7
 
 
 class NoRedirects(urllib.request.HTTPRedirectHandler):
@@ -79,7 +79,7 @@ def main():
             print(f"Attempt {attempt}/{MAX_ATTEMPTS}: {type(exc).__name__}: {exc}",
                   file=sys.stderr, flush=True)
             if attempt < MAX_ATTEMPTS:
-                time.sleep(5)
+                time.sleep(15)
     print(json.dumps({
         "probe": "historical_node_public_host",
         "host": HOST,
