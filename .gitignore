@@ -36,3 +36,8 @@ phone-data/
 **/maildir/
 **/maildirs/
 **/.venv/
+
+# Public gateway supervisor metadata, never repository material
+**/public-gateway.json
+**/public-gateway.pid
+**/public-gateway.log
