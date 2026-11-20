@@ -1,0 +1,26 @@
+name: Monico historical public URL live check
+
+on:
+  push:
+    paths:
+      - 'linux/probe_legacy_public.py'
+      - '.github/workflows/monico-historical-public-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  outside-network-historical-backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify historical Render URL through independent HTTPS and anonymous-auth checks
+        run: python3 linux/probe_legacy_public.py
+      - name: Explain precisely what was verified
+        if: always()
+        run: |
+          echo 'Target: historical Node email backend in Cloudflare worker config.'
+          echo 'This does not certify the user Chromebook or Monico Linux mail SMTP host.'
+          echo 'No credentials, mail messages or phone calls are submitted.'
