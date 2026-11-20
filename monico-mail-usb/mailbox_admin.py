@@ -29,6 +29,8 @@ def main():
     create = sub.add_parser("create", help="Create a unique email account and two secrets")
     create.add_argument("agent_id")
     create.add_argument("name", help="Requested unique local part before the @")
+    system = sub.add_parser("create-system", help="Locally create required postmaster/abuse mailbox")
+    system.add_argument("role", choices=("postmaster", "abuse"))
     sub.add_parser("count", help="Count independent registered mailboxes")
     sub.add_parser("status", help="Show chosen domain and available mailbox slots")
     issue = sub.add_parser("issue-invites", help="Create one-use signup invitations for agents")
@@ -48,7 +50,9 @@ def main():
     registry = Registry(root, domain)
     claims = MailboxClaims(registry, capacity=int(os.environ.get("MONICO_MAX_MAILBOXES", "1000")))
     try:
-        if args.command == "create":
+        if args.command == "create-system":
+            result = registry.provision_system_mailbox(args.role)
+        elif args.command == "create":
             if claims.slots()["unreserved_slots"] < 1:
                 raise ValueError("The configured mailbox limit or pending invites reserve all slots")
             result = registry.register(args.agent_id, args.name)
