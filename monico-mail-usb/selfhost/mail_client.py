@@ -75,7 +75,7 @@ class SelfHostedMail:
                                   WHERE agent_id=? AND attempted>?""",
                                (agent_id, now - 3600)).fetchone()[0]
             all_count = db.execute("""SELECT COUNT(*) FROM smtp_attempts
-                                     WHERE attempted>?""", (now - 3600)).fetchone()[0]
+                                     WHERE attempted>?""", (now - 3600,)).fetchone()[0]
             if count >= 10 or all_count >= 1000:
                 raise ValueError("Hourly SMTP submission limit reached")
             db.execute("INSERT INTO smtp_attempts(agent_id, attempted) VALUES (?,?)",
