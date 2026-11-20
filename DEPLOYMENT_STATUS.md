@@ -119,6 +119,25 @@ systemctl --user status monico-agent.service
 
 Chromebook Crostini may still suspend independently of systemd.
 
+## Legacy Render HTTP backend repair attempt — November 20, 2026
+
+The optional Node email API's Render blueprint and HTTP startup were repaired
+in GitHub: Render chooses the HTTP `PORT`, startup is tested without a
+separate SMTP socket, new Blueprint deployments generate operator secrets,
+and `/ready` blocks on volatile/unavailable storage or an insecure
+operator token. The Cloudflare Worker no longer contains the historic dead
+Render URL as its delivery destination. These are **code fixes**, not evidence
+that the old Render account has redeployed or resumed.
+
+- [Passing Node API and Render Linux smoke tests](https://github.com/jaykk99/agent-mail-service/actions/runs/44807196874)
+- [Render operator recovery guide](RENDER_RECOVERY.md)
+
+**Still needs a connected Render account or service administrator:** inspect
+suspension/status and logs, deploy the latest GitHub commit, and verify
+the public `/health` and `/ready` endpoints. Render's free hosting is
+not suitable for persistent SMTP/IMAP mailboxes or direct public TCP25.
+The primary Monico Linux mail stack remains separate and local-test verified.
+
 ## Independent internet verification result — November 20, 2026
 
 The repository's legacy Cloudflare Email Worker configuration references
