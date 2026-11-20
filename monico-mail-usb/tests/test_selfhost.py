@@ -10,7 +10,9 @@ class SelfHostedConfigTests(unittest.TestCase):
             output = render("monicomail.org", db, str(Path(tmp) / "maildirs"), 2001, 2001,
                             "/etc/ssl/certs/mail.pem", "/etc/ssl/private/mail.key",
                             "1.1.1.1")
-            self.assertEqual(len(output), 7)
+            self.assertEqual(len(output), 8)
+            self.assertIn("dovecot_config_version = 2.4.0", output["dovecot-2.4-extra.conf"])
+            self.assertIn("mail_accounts", output["dovecot-2.4-extra.conf"])
             self.assertIn("virtual_transport = lmtp:unix:private/dovecot-lmtp",
                           output["postfix-main.cf"])
             self.assertIn("SELECT email FROM agents", output["postfix-sqlite-virtual-mailboxes.cf"])
