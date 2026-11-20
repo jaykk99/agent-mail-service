@@ -1,0 +1,19 @@
+[Unit]
+Description=Agent Mail phone server (internal extensions 2000-2999)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# EDIT: unprivileged user that owns the checkout and the phone state dir.
+User=agentmail
+WorkingDirectory=/home/agentmail/agent-mail-service
+EnvironmentFile=/home/agentmail/agent-mail-service/.env
+ExecStart=/bin/bash start.sh --serve --port 8765
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -29,6 +29,29 @@ def atomic_write(path, data, mode=0o600):
             os.unlink(temporary)
 
 
+def write_calling_linux_map(state_dir, identities):
+    """Map Monico extensions 2000..2999 to Calling-linux SIP usernames.
+
+    Usernames only, never passwords. Calling-linux's demo registrar accepts
+    REGISTER without authentication, so this file must never be treated as
+    credential provisioning: real SIP auth stays in pjsip_agents.conf above,
+    and the Calling-linux registrar must be gated (SIP_ALLOW_UNAUTH_REGISTER)
+    before any exposure.
+    """
+    lines = [
+        '; Calling-linux SIP username map. MAPPING ONLY, no credentials.\n',
+        '; Monico extension -> Calling-linux legacy extension -> SIP username\n',
+        '; Real authentication lives in pjsip_agents.conf. Do not paste\n',
+        '; passwords here and do not point Asterisk at an unauthenticated\n',
+        '; registrar. See phone/calling_linux_bridge.py for the live link.\n\n',
+    ]
+    for ext in sorted(identities, key=int):
+        legacy = int(ext) - BASE_EXTENSION + 1
+        lines.append(f'; {ext} -> legacy {legacy} -> did_1201555{legacy:04d}\n')
+    atomic_write(Path(state_dir) / 'pjsip_calling_linux_map.conf', ''.join(lines))
+    return {'mapped': len(identities)}
+
+
 def provision(state_dir, count=1000):
     """Allocate stable 2000..2999 extension identities in a private directory."""
     if not isinstance(count, int) or not (1 <= count <= MAX_AGENTS):
@@ -99,6 +122,7 @@ def provision(state_dir, count=1000):
             'remove_existing=yes\n\n',
         ])
     atomic_write(state_dir / 'pjsip_agents.conf', ''.join(pjsip))
+    write_calling_linux_map(state_dir, identities)
     dialplan = (
         '; INTERNAL calls only. There is no dial-out route to the PSTN.\n'
         '[agents-internal]\n'

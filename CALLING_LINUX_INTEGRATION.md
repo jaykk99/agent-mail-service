@@ -30,6 +30,40 @@ keeping public-network claims honest.
    Postfix/Dovecot for separately authenticated email addresses.
    `Calling-linux` simulated SMTP notifications were not imported.
 
+## Live wiring (both servers on one Linux box)
+
+The two projects are now wired together at runtime, not just by a one-off
+label import. Full run book: [RUN_ON_LINUX.md](RUN_ON_LINUX.md).
+
+- **One command:** `bash start-all.sh` brings up the phone server (:8765),
+  the mail API + SMTP (:3000 / :2525) and Calling-linux (:3001, SIP :5060,
+  SMTP :2526).
+- **Live bridge:** `phone/calling_linux_bridge.py` reads Calling-linux
+  capabilities, fleet labels and its e2e self-test over HTTP
+  (`CALLING_LINUX_URL`, default `http://127.0.0.1:3001`). The phone
+  server exposes `GET /api/calling-linux/status` (agent auth) and reports
+  `callingLinux: {live, sip, smtp, turn, imap}` in `/health`; down means
+  `live: false`, never invented counts.
+- **Dovecot mailboxes:** `phone/calling_linux_mailboxes.py` generates real
+  per-agent mailboxes from the provisioned identities: a `dovecot-users`
+  passwd file with real SHA512-CRYPT hashes, a `credentials.json` for
+  Calling-linux imap-sync, and a `make-maildirs.sh` for the shared
+  Maildir root `/var/mail/vhosts/<domain>/<local>`.
+- **SIP identities:** `phone/provision.py` also writes
+  `pjsip_calling_linux_map.conf`, a username-only map (Monico ext ->
+  `did_1201555XXXX`). No passwords in it.
+- **TURN:** one shared secret, `PHONE_TURN_SECRET` (Monico) and
+  `TURN_SECRET` (Calling-linux) are aliases; host from `PHONE_TURN_IP`
+  or `TURN_URL`.
+- **Agent Mail panel:** Calling-linux's dashboard has an Agent Mail tab
+  backed by `GET /api/agent-mail/status`, which proxies the mail API
+  `/health` (`AGENT_MAIL_URL`, default `http://127.0.0.1:3000`) and shows
+  real counts or `not live`.
+- **REGISTER gate:** Calling-linux's embedded SIP REGISTER handler refuses
+  unauthenticated REGISTER (403) unless `SIP_ALLOW_UNAUTH_REGISTER=1` is
+  set explicitly on localhost. OPTIONS still answers. Seeded demo OTPs,
+  counters and the seeded message were stripped; counts start at 0.
+
 ## Linux setup and smoke tests
 
 First run the agent application locally and create 1,000 real **private**
@@ -84,8 +118,8 @@ You can run this on a separate, authorized Linux machine against your
 reachable SIP server to test network access. A SIP `401` challenge also
 shows that SIP responded. This does **not** prove successful registration,
 audio transport, a carrier-assigned number or public phone calls.
-Avoid exposing the demo SIP registrar from `Calling-linux` to the internet;
-its REGISTER handler does not authenticate callers.
+Calling-linux's demo SIP registrar refuses unauthenticated REGISTER by
+default (`SIP_ALLOW_UNAUTH_REGISTER=0`); do not opt in on a public host.
 
 For the public **Monico browser application**, follow
 [phone/PUBLIC_ACCESS.md](phone/PUBLIC_ACCESS.md) to create an IP-address TLS
@@ -113,7 +147,9 @@ router and test from an unrelated network with `phone/probe_public.py`.
 
 ## Test status
 
-Run `python3 -m unittest discover -s test -p 'test_phone*.py' -v`.
+Run `python3 -m unittest discover -s test -p 'test_phone*.py' -v` (includes
+the bridge, mailbox and TURN-alias tests in `test_phone_calling_bridge.py`
+and `test_phone_calling_mailboxes.py`).
 GitHub Actions verifies metadata import and authenticated directory output
 with no forged public numbers, and performs actual loopback UDP SIP OPTIONS
 and HTTPS API tests. Public internet connectivity, telephone calls, SMS,

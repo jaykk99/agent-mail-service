@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from provision import provision
+from calling_linux_bridge import CallingLinuxBridge
 from internal_mail import LocalMailRouter, MailError, INTERNAL_DOMAIN
 from webphone import WebPhone, WebPhoneError
 from turn_relay import client_ice_config
@@ -50,6 +51,12 @@ class AgentPhone:
             except (OSError, ValueError, TypeError):
                 # A corrupt optional metadata file cannot revoke/rekey agents.
                 self.calling_linux_labels = {}
+        # Live bridge to a jaykk99/Calling-linux server (optional). When it
+        # is down, status calls report live: False instead of inventing state.
+        try:
+            self.calling_linux = CallingLinuxBridge()
+        except ValueError:
+            self.calling_linux = None
         # Random high-entropy credential fingerprint identifies this specific
         # storage vault, preventing accidental cross-connection on reused ports.
         self.instance_id = hashlib.sha256(
@@ -180,10 +187,19 @@ def handler_factory(service, html_path):
             parsed = urlsplit(self.path)
             path = parsed.path
             if path == '/health':
+                calling = {'live': False}
+                if service.calling_linux is not None:
+                    try:
+                        probe = CallingLinuxBridge(
+                            service.calling_linux.base_url, timeout=0.75)
+                        calling = probe.status()
+                    except ValueError:
+                        calling = {'live': False}
                 return self._reply(200, {'ok': True, 'internalOnly': True,
                                          'publicNumbers': False, 'agents': len(service.phones),
                                          'instanceId': service.instance_id,
-                                         'privateDomain': 'agents.localhost'})
+                                         'privateDomain': 'agents.localhost',
+                                         'callingLinux': calling})
             if path == '/' or (path.startswith('/call/') and 24 <= len(path[6:]) <= 128
                                 and '/' not in path[6:]):
                 data = (html_path if path == '/' else html_path.with_name('webphone_guest.html')).read_bytes()
@@ -286,6 +302,16 @@ def handler_factory(service, html_path):
                                          'cursor': events[-1]['id'] if events else after})
             if path == '/api/signals/cursor':
                 return self._reply(200, {'ok': True, 'cursor': service.cursor(actor, 'signal')})
+            if path == '/api/calling-linux/status':
+                if service.calling_linux is None:
+                    return self._reply(200, {'ok': True, 'live': False,
+                        'error': 'CALLING_LINUX_URL is not a valid http(s) URL'})
+                live = service.calling_linux.status()
+                e2e = service.calling_linux.verify_e2e()
+                labels = service.calling_linux.fleet_labels()
+                return self._reply(200, {'ok': True, **live, 'e2e': e2e,
+                    'fleetLabelsLive': labels.get('live', False),
+                    'fleetLabels': len(labels.get('labels') or {})})
             return self._reply(404, {'ok': False, 'error': 'Not found'})
 
         def do_POST(self):

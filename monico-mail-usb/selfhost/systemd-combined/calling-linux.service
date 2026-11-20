@@ -1,0 +1,23 @@
+[Unit]
+Description=Calling-linux carrier dashboard, SIP registrar and SMTP listener
+After=network-online.target agent-mail-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# EDIT: unprivileged user that owns the checkout.
+User=agentmail
+WorkingDirectory=/home/agentmail/Calling-linux
+EnvironmentFile=/home/agentmail/Calling-linux/.env
+Environment=PORT=3001
+Environment=SIP_PORT=5060
+Environment=SMTP_INBOUND_PORT=2526
+Environment=AGENT_MAIL_URL=http://127.0.0.1:3000
+ExecStart=/usr/bin/npm run start
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

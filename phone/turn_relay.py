@@ -3,6 +3,13 @@
 
 No external STUN/TURN API. Coturn itself must be installed on your Linux
 machine and UDP/TCP ports reachable. TURN relay CANNOT create PSTN numbers.
+
+Shared secret naming (one Coturn instance serves both sides):
+  PHONE_TURN_SECRET (Monico) and TURN_SECRET (Calling-linux) are aliases for
+  the same static-auth-secret; PHONE_TURN_IP is the public IPv4, and the
+  host may also come from TURN_URL (turn:<host>:<port>). Set one secret in
+  one place (the shared EnvironmentFile, see RUN_ON_LINUX.md) and both sides
+  read it. The secret format is unchanged (HMAC-SHA1 time-limited creds).
 """
 import argparse
 import base64
@@ -48,14 +55,35 @@ def make_ice_credentials(identity, secret, ip, port=3478, ttl=3600, now=None):
     }], "turnConfigured": True, "expiresAt": expiry}
 
 
-def client_ice_config(identity):
-    secret = os.environ.get("PHONE_TURN_SECRET", "")
+def turn_secret():
+    """Shared TURN secret: PHONE_TURN_SECRET, else the Calling-linux alias."""
+    return (os.environ.get("PHONE_TURN_SECRET", "")
+            or os.environ.get("TURN_SECRET", "")
+            or os.environ.get("TURN_PASSWORD", ""))
+
+
+def turn_host_port():
+    """Public TURN host/port: PHONE_TURN_IP/PHONE_TURN_PORT, else TURN_URL."""
     ip = os.environ.get("PHONE_TURN_IP", "")
+    port = int(os.environ.get("PHONE_TURN_PORT", "3478"))
+    if not ip:
+        url = os.environ.get("TURN_URL", "")
+        match = re.fullmatch(r"turn:([A-Za-z0-9._-]+)(?::(\d+))?", url.strip())
+        if match:
+            ip = match.group(1)
+            if match.group(2):
+                port = int(match.group(2))
+    return ip, port
+
+
+def client_ice_config(identity):
+    secret = turn_secret()
+    ip, port = turn_host_port()
     if not secret and not ip:
         return {"iceServers": [], "turnConfigured": False}
     if not secret or not ip:
-        raise ValueError("Both PHONE_TURN_SECRET and PHONE_TURN_IP are required")
-    port = int(os.environ.get("PHONE_TURN_PORT", "3478"))
+        raise ValueError("Both a TURN secret (PHONE_TURN_SECRET or TURN_SECRET) "
+                         "and a TURN host (PHONE_TURN_IP or TURN_URL) are required")
     return make_ice_credentials(identity, secret, ip, port=port)
 
 
@@ -98,7 +126,7 @@ def main():
     p.add_argument("--port", type=int, default=3478)
     p.add_argument("--output", default=".generated/turnserver.conf")
     args = p.parse_args()
-    secret = os.environ.get("PHONE_TURN_SECRET", "")
+    secret = turn_secret()
     try:
         contents = render_coturn(args.public_ip, secret, args.local_ip, args.port)
     except (ValueError, TypeError) as exc:
@@ -110,7 +138,8 @@ def main():
     file.write_text(contents, encoding="utf-8")
     file.chmod(0o600)
     print(f"Staged private Coturn config: {file}. Does not install or start TURN.")
-    print("Export PHONE_TURN_IP and PHONE_TURN_SECRET in the Monico server environment.")
+    print("Export PHONE_TURN_IP and PHONE_TURN_SECRET in the Monico server environment")
+    print("(TURN_URL + TURN_SECRET are accepted aliases, shared with Calling-linux).")
     print("Forward TURN UDP/TCP port and UDP relay ports 49160–65535 to THIS Linux host.")
     print("TURN relays WebRTC audio ONLY. Not phone carrier traffic.")
 

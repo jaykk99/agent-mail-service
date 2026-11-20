@@ -1,0 +1,22 @@
+[Unit]
+Description=Agent Mail API and SMTP listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# EDIT: unprivileged user that owns the checkout.
+User=agentmail
+WorkingDirectory=/home/agentmail/agent-mail-service
+EnvironmentFile=/home/agentmail/agent-mail-service/.env
+Environment=PORT=3000
+Environment=SMTP_PORT=2525
+Environment=CALLING_LINUX_URL=http://127.0.0.1:3001
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
