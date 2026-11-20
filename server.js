@@ -62,6 +62,9 @@ app.use(express.json({ limit: '50kb' }));
 
 const PORT = process.env.PORT || 3000;
 const SMTP_PORT = process.env.SMTP_PORT || 2525;
+// Render and other HTTP-only hosts must not try to publish a separate SMTP port.
+// A disabled listener does not disable HTTP inbound worker delivery.
+const SMTP_ENABLED = String(process.env.SMTP_ENABLED || '1') !== '0';
 const TOKEN = process.env.AGENT_MAIL_TOKEN || 'dev-token-change-me';
 if (TOKEN === 'dev-token-change-me') {
   console.warn('[security] AGENT_MAIL_TOKEN is the default dev token — set a long random token in production!');
@@ -1431,6 +1434,10 @@ app.get('/health', async (req, res) => {
       ok: true,
       domain: DOMAIN,
       storage: useSupabase ? 'supabase' : 'memory',
+      durableStorage: useSupabase,
+      smtpListenerEnabled: SMTP_ENABLED,
+      // HTTP reachability is NOT proof of Internet SMTP or mailbox delivery.
+      externalEmailVerified: false,
       addresses: await countAddresses().catch(() => null),
       accounts: await countAccounts().catch(() => null),
       signup: SIGNUP_OPEN ? 'open' : 'closed',
@@ -1975,9 +1982,13 @@ if (require.main === module) {
       (err.code === 'EACCES' ? ' (ports below 1024 need root or CAP_NET_BIND_SERVICE; see README)' : ''));
     if (err.code === 'EACCES' || err.code === 'EADDRINUSE') process.exit(1);
   });
-  smtp.listen(SMTP_PORT, process.env.SMTP_HOST || '0.0.0.0', () => {
-    console.log(`[smtp] listening on port ${SMTP_PORT}`);
-  });
+  if (SMTP_ENABLED) {
+    smtp.listen(SMTP_PORT, process.env.SMTP_HOST || '0.0.0.0', () => {
+      console.log(`[smtp] listening on port ${SMTP_PORT}`);
+    });
+  } else {
+    console.log('[smtp] listener disabled (HTTP-only deployment); external SMTP receipt not available');
+  }
 
   app.listen(PORT, () => {
     console.log(`[api] listening on port ${PORT}, domain=${DOMAIN}`);
