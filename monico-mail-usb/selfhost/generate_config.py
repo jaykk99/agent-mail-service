@@ -84,6 +84,7 @@ submission inet n       -       y       -       -       smtpd
 """
     dovecot_conf = f"""# Additional Dovecot 2.3 configuration; do not copy into Dovecot 2.4 without updating
 protocols = imap lmtp
+postmaster_address = postmaster@{domain}
 mail_location = maildir:{mail_root}/%d/%n/Maildir
 ssl = required
 ssl_min_protocol = TLSv1.2
@@ -126,6 +127,7 @@ password_query = SELECT a.email AS user, m.password_hash AS password FROM agents
 dovecot_config_version = 2.4.0
 dovecot_storage_version = 2.4.0
 protocols = imap lmtp
+postmaster_address = postmaster@{domain}
 mail_driver = maildir
 mail_path = ~/Maildir
 ssl = yes
