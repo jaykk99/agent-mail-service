@@ -69,6 +69,15 @@ jobs:
               subprocess.run(['node', '--check', str(dest)], check=True)
           PY
 
+  thousand-agent-http-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authenticate and route 1000 real HTTP agent messages on Linux
+        run: |
+          python3 phone/ci/verify_1000_http.py
+
   full-linux-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 15
