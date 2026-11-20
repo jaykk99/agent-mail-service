@@ -42,9 +42,12 @@ jobs:
               def handle_data(self, value):
                   if self.in_script:
                       self.scripts.append(value)
-          p = ScriptParser()
-          for file in ('phone/index.html', 'phone/webphone_guest.html'):
+          import subprocess
+          for idx, file in enumerate(('phone/index.html', 'phone/webphone_guest.html')):
+              p = ScriptParser()
+              p.scripts = []
               p.feed(Path(file).read_text())
-          Path('/tmp/agent-phone-ui.js').write_text('\n'.join(p.scripts))
+              dest = Path(f'/tmp/agent-phone-ui-{idx}.js')
+              dest.write_text('\n'.join(p.scripts))
+              subprocess.run(['node', '--check', str(dest)], check=True)
           PY
-          node --check /tmp/agent-phone-ui.js
