@@ -1,0 +1,30 @@
+name: Monico real SMTP LMTP IMAP Linux integration
+on:
+  push:
+    paths:
+      - 'monico-mail-usb/**'
+      - '.github/workflows/monico-real-smtp-imap.yml'
+  pull_request:
+    paths:
+      - 'monico-mail-usb/**'
+      - '.github/workflows/monico-real-smtp-imap.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-mail-loopback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install real Postfix/Dovecot and deliver one self-hosted email via TLS
+        run: sudo -E bash monico-mail-usb/ci/real_mail_loopback.sh
+      - name: Show Postfix/Dovecot logs when integration fails
+        if: failure()
+        run: |
+          sudo postfix check || true
+          sudo doveconf -n || true
+          sudo journalctl -u postfix -u dovecot --no-pager -n 150 || true
+          sudo tail -n 150 /var/log/mail.log || true
