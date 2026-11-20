@@ -29,7 +29,7 @@ jobs:
       - name: Verify on system Python (no pip installs)
         run: |
           python3 --version
-          python3 -m py_compile phone/provision.py phone/server.py phone/mcp.py phone/start.py phone/internal_mail.py phone/usb_storage.py phone/webphone.py phone/probe_public.py linux/manage.py linux/public_manage.py
+          python3 -m py_compile phone/provision.py phone/server.py phone/mcp.py phone/start.py phone/internal_mail.py phone/usb_storage.py phone/webphone.py phone/probe_public.py linux/manage.py linux/public_manage.py linux/autostart.py linux/watchdog.py linux/release_gate.py
           sh -n start.sh
           bash -n linux/install.sh
           python3 -m unittest discover -s test -p 'test_phone*.py' -v
@@ -121,6 +121,26 @@ jobs:
           assert r['public_browser_gateway']['local_https_running']
           assert not r['public_browser_gateway']['outside_network_verified']
           print("Doctor separated working local services from unverified public delivery")
+          PY
+          python3 linux/release_gate.py --scope local --state-dir "$TEST_STATE" > "$RUNNER_TEMP/release-local.json"
+          python3 - "$RUNNER_TEMP/release-local.json" <<'PY'
+          import json,sys
+          result=json.load(open(sys.argv[1]))
+          assert result['ready'] and result['scope']=='local', result
+          assert all(c['pass'] for c in result['checks']), result
+          assert result['public_internet_email_verified'] is False
+          print('Local deployment RELEASE GATE: PASS without public claims')
+          PY
+          if python3 linux/release_gate.py --scope all --state-dir "$TEST_STATE" > "$RUNNER_TEMP/release-public.json"; then
+            echo "SECURITY ERROR: falsely claimed public production readiness" >&2
+            exit 1
+          fi
+          python3 - "$RUNNER_TEMP/release-public.json" <<'PY'
+          import json,sys
+          result=json.load(open(sys.argv[1]))
+          assert not result['ready'] and result['local_ready']
+          assert not result['public_pstn_sms_verified']
+          print('External deployment RELEASE GATE: BLOCKED until real-world verification')
           PY
           sha256sum "$TEST_STATE/monico/linux-config.json" "$TEST_STATE/monico/agents.sqlite3" > "$RUNNER_TEMP/pre-restart-hashes"
           bash start.sh --full stop --state-dir "$TEST_STATE"
