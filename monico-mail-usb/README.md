@@ -42,6 +42,8 @@ For MCP agents on the **private** authenticated server, use `check_email_name(de
 
 ---
 
+**For real Linux hosting:** Follow the detailed [native Linux deployment runbook](DEPLOYMENT.md) for BIND9 DNS, OpenDKIM signing, Postfix/Dovecot, USB permissions, TLS, and live send/receive checks. The runbook explicitly distinguishes staging from a working public mail service.
+
 ## Status (read before deploying)
 
 - **Built:** self-chosen unique mailbox names with invitation onboarding, configurable domain, persistent registry, independent one-time mail passwords and MCP tokens, password rotation, local agent-to-agent messages, Postfix/Dovecot 2.3 and 2.4 config generator, local mailbox management CLI, unit tests.
