@@ -47,10 +47,24 @@ from selfhost.generate_config import render
 data = Path(os.environ["MONICO_CI_DATA"])
 domain = os.environ["MONICO_CI_DOMAIN"]
 reg = Registry(data, domain)
-account = reg.register("agent_ci_001", "local-delivery")
-assert account["mail_password"] and account["email"] == f"local-delivery@{domain}"
+import json
+agents = {
+    "research": reg.register("agent_ci_research", "research"),
+    "support": reg.register("agent_ci_support", "support"),
+    "notifications": reg.register("agent_ci_notifications", "notifications"),
+}
+assert len({record["email"] for record in agents.values()}) == 3
+assert all(record["mail_password"] and record["token"] for record in agents.values())
+credentials = data / "ci-credentials.json"
+credentials.write_text(json.dumps({key: {
+    "email": record["email"],
+    "mail_password": record["mail_password"],
+    "agent_id": record["agent_id"],
+    "token": record["token"],
+} for key, record in agents.items()}))
+credentials.chmod(0o600)
 secret_file = data / "ci-secret"
-secret_file.write_text(account["mail_password"], encoding="utf-8")
+secret_file.write_text(agents["research"]["mail_password"], encoding="utf-8")
 secret_file.chmod(0o600)
 files = render(domain, str(data / "agents.sqlite3"),
                str(data / "maildirs"), int(os.environ["MONICO_CI_VMAIL_UID"]),
@@ -64,7 +78,7 @@ with (folder / "master.cf").open("a") as stream:
     stream.write("\n" + files["postfix-master-submission.cf"] + "\n")
 Path("/etc/dovecot/conf.d/99-monico-ci.conf").write_text(files["dovecot-2.3-extra.conf"])
 Path("/etc/dovecot/dovecot-sql.conf.ext").write_text(files["dovecot-sql.conf.ext"])
-print("Application registered one unique mailbox; real Postfix/Dovecot templates installed on CI runner")
+print("Three agent-chosen mailboxes registered; real Postfix/Dovecot templates installed on CI runner")
 PY
 
 # Only these two service identities may read the credential-hash SQLite DB.
@@ -79,11 +93,14 @@ doveconf -n | head -100
 echo "Check generated Postfix sender mapping authorization:"
 postconf -h proxy_read_maps | grep -Fq "proxy:sqlite:/etc/postfix/sqlite-sender-login.cf"
 echo "Check actual Postfix SQLite recipient lookup:"
-test "$(postmap -q "local-delivery@$DOMAIN" sqlite:/etc/postfix/sqlite-virtual-mailboxes.cf)" = "local-delivery@$DOMAIN"
+for name in research support notifications; do
+  test "$(postmap -q "$name@$DOMAIN" sqlite:/etc/postfix/sqlite-virtual-mailboxes.cf)" = "$name@$DOMAIN"
+done
+test -z "$(postmap -q "nonexistent@$DOMAIN" sqlite:/etc/postfix/sqlite-virtual-mailboxes.cf)"
 echo "Check real Dovecot authentication:"
 dovecot stop >/dev/null 2>&1 || true
 dovecot
-doveadm auth test "local-delivery@$DOMAIN" "$(cat "$DATA/ci-secret")" | grep -qi 'auth succeeded'
+doveadm auth test "research@$DOMAIN" "$(cat "$DATA/ci-secret")" | grep -qi 'auth succeeded'
 postfix stop >/dev/null 2>&1 || true
 postfix start
 sleep 3
@@ -97,8 +114,10 @@ from selfhost.smoke_test import smoke_test
 domain = os.environ["MONICO_CI_DOMAIN"]
 data = Path(os.environ["MONICO_CI_DATA"])
 secret = (data / "ci-secret").read_text(encoding="utf-8")
-assert smoke_test("mail." + domain, "local-delivery@" + domain, secret, timeout=45)
+assert smoke_test("mail." + domain, "research@" + domain, secret, timeout=45)
 print("PASS: actual Linux Postfix/Dovecot SMTP submission and IMAP inbox verification")
 PY
-rm -f "$DATA/ci-secret"
+echo "Real cross-agent SMTP/IMAP security and delivery assertions:"
+python3 ci/real_mail_assertions.py
+rm -f "$DATA/ci-secret" "$DATA/ci-credentials.json"
 echo "This verifies local mail transport only, NOT external Internet MX/PTR/port-25 availability."
