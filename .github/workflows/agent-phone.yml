@@ -34,6 +34,14 @@ jobs:
           bash -n linux/install.sh
           python3 -m unittest discover -s test -p 'test_phone*.py' -v
           python3 -m unittest discover -s test -p 'test_linux*.py' -v
+      - name: Validate generated Linux autostart unit using systemd-analyze
+        run: |
+          python3 linux/autostart.py --dry-run > "$RUNNER_TEMP/monico-agent.service"
+          if command -v systemd-analyze >/dev/null 2>&1; then
+            systemd-analyze verify "$RUNNER_TEMP/monico-agent.service"
+          else
+            echo "No systemd-analyze on runner; syntax covered by unit tests"
+          fi
       - name: Parse browser JavaScript syntax (CI only)
         run: |
           python3 - <<'PY'
