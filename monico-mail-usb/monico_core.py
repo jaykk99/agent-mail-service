@@ -25,6 +25,7 @@ class Registry:
                 token_hash TEXT NOT NULL,
                 created INTEGER NOT NULL
             )""")
+            c.execute("""CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, created INTEGER NOT NULL)""")
 
     def connect(self):
         c = sqlite3.connect(self.db, timeout=20)
@@ -71,3 +72,37 @@ class Registry:
             if c.total_changes != 1:
                 raise ValueError("Credential was already rotated")
         return new
+
+    def send_internal(self, agent_id, token, recipient, subject, body):
+        """Deliver locally only to another registered Monico identity."""
+        sender = self.get_email(agent_id, token)
+        if not isinstance(recipient, str) or not isinstance(subject, str) or not isinstance(body, str):
+            raise ValueError("Invalid message fields")
+        if len(subject) > 200 or len(body) > 100000:
+            raise ValueError("Message exceeds size limit")
+        with self.connect() as c:
+            found = c.execute("SELECT 1 FROM agents WHERE email=?", (recipient,)).fetchone()
+            if not found:
+                raise ValueError("Recipient is not a registered local Monico mailbox")
+            cur = c.execute("INSERT INTO messages(sender,recipient,subject,body,created) VALUES(?,?,?,?,?)",
+                            (sender, recipient, subject, body, int(time.time())))
+            return {"message_id": cur.lastrowid, "from": sender, "to": recipient, "delivered_locally": True}
+
+    def inbox(self, agent_id, token, limit=20):
+        email = self.get_email(agent_id, token)
+        if not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("Limit must be 1-100")
+        with self.connect() as c:
+            rows = c.execute("SELECT id,sender,subject,created FROM messages WHERE recipient=? ORDER BY id DESC LIMIT ?",
+                             (email, limit)).fetchall()
+        return [{"id": mid, "from": sender, "subject": subject, "created": created}
+                for mid, sender, subject, created in rows]
+
+    def read_message(self, agent_id, token, message_id):
+        email = self.get_email(agent_id, token)
+        with self.connect() as c:
+            row = c.execute("SELECT id,sender,recipient,subject,body,created FROM messages WHERE id=? AND recipient=?",
+                            (message_id, email)).fetchone()
+        if not row:
+            raise ValueError("Message not found")
+        return dict(zip(("id", "from", "to", "subject", "body", "created"), row))
