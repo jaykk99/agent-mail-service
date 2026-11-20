@@ -10,8 +10,12 @@ on:
       - '.github/workflows/monico-mail-usb-tests.yml'
   workflow_dispatch:
 jobs:
-  registry-tests:
+  linux-tests:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.13']
     defaults:
       run:
         working-directory: monico-mail-usb
@@ -19,8 +23,29 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - name: Syntax check
-        run: python -m compileall -q monico_core.py server.py tests
-      - name: Registry unit tests
+          python-version: ${{ matrix.python-version }}
+      - name: Check Python syntax in registry, MCP, mail and tests
+        run: python -m compileall -q monico_core.py server.py mailbox_admin.py selfhost tests
+      - name: Check shell scripts
+        run: bash -n run-tests.sh start-monico.sh chromebook-setup.sh
+      - name: Exercise independent mailbox and SMTP/IMAP unit tests
         run: bash run-tests.sh
+      - name: Install FastMCP runtime dependency
+        run: python -m pip install -r requirements.txt
+      - name: Verify actual MCP server imports with bearer auth and temporary USB substitute
+        run: |
+          python - <<'PY'
+          import os
+          import tempfile
+          with tempfile.TemporaryDirectory() as data:
+              os.environ["MONICO_DATA"] = data
+              os.environ["MONICO_DOMAIN"] = "mail.example.invalid"
+              os.environ["MONICO_ADMIN_KEY"] = "a" * 48
+              os.environ["MONICO_MCP_BEARER_TOKEN"] = "b" * 48
+              import server
+              assert server.mcp is not None
+              assert server.registry.mailbox_count() == 0
+              assert server.self_hosted_mail is None
+              assert server.registry.register("agent_001", "alice")["mail_password"]
+              print("MCP import, bearer verifier and registry initialization passed")
+          PY
