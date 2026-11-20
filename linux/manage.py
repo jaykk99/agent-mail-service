@@ -212,7 +212,17 @@ def stop_mcp(folder):
     pid = _read_saved_mcp_pid(folder)
     if pid and _pid_active(pid, MAIL / "server.py"):
         os.kill(pid, signal.SIGTERM)
-        return "stop signal sent"
+        # Don't report 'stopped' until this endpoint stops accepting requests.
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            if not _pid_active(pid, MAIL / "server.py") and not _port_open(MCP_PORT):
+                break
+            time.sleep(0.1)
+        if _pid_active(pid, MAIL / "server.py") or _port_open(MCP_PORT):
+            raise RuntimeError("MCP shutdown incomplete; inspect its process before restarting")
+        _mcp_pid_path(folder).unlink(missing_ok=True)
+        return "stopped"
+    _mcp_pid_path(folder).unlink(missing_ok=True)
     return "not running"
 
 
