@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - 'linux/probe_legacy_public.py'
+      - 'server.js'
+      - 'render.yaml'
       - '.github/workflows/monico-historical-public-check.yml'
   workflow_dispatch:
 
