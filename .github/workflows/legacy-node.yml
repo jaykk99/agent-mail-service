@@ -1,0 +1,48 @@
+name: Legacy Node email API and Render deployment checks
+
+on:
+  push:
+    paths:
+      - 'server.js'
+      - 'render.yaml'
+      - 'Dockerfile'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'test/**'
+      - 'cloudflare/email-worker/**'
+      - '.github/workflows/legacy-node.yml'
+  pull_request:
+    paths:
+      - 'server.js'
+      - 'render.yaml'
+      - 'Dockerfile'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'test/**'
+      - 'cloudflare/email-worker/**'
+      - '.github/workflows/legacy-node.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-api:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked server dependencies
+        run: npm ci
+      - name: Verify JS syntax
+        run: |
+          npm run check
+          node --check test/render.http.test.js
+      - name: Run all existing Node API and inbound worker tests
+        run: npm test
+      - name: Execute real HTTP-only Render process and reject anonymous API access
+        run: node test/render.http.test.js
