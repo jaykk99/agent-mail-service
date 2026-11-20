@@ -22,7 +22,8 @@ except ImportError:
 
 
 def prepare(domain, data, public_ip, ns1_ip, ns2_ip, vmail_uid, vmail_gid,
-            cert, key, output, dkim_public_txt=None, mcp_cert=None, mcp_key=None):
+            cert, key, output, dkim_public_txt=None, mcp_cert=None, mcp_key=None,
+            public_ipv6=None, ns1_ipv6=None, ns2_ipv6=None):
     domain = check_domain(domain)
     data = Path(data).expanduser().resolve(strict=True)
     if not data.is_dir() or not os.access(data, os.W_OK):
@@ -45,9 +46,11 @@ def prepare(domain, data, public_ip, ns1_ip, ns2_ip, vmail_uid, vmail_gid,
         if not row or row[0] != domain:
             raise ValueError("Existing mail accounts must belong to the chosen domain")
     templates = render(domain, str(db), str(data / "maildirs"), vmail_uid,
-                       vmail_gid, str(cert), str(key), public_ip)
+                       vmail_gid, str(cert), str(key), public_ip,
+                       public_ipv6=public_ipv6)
     public_key = read_opendkim_public_txt(dkim_public_txt) if dkim_public_txt else None
-    dns = zone_text(domain, public_ip, ns1_ip, ns2_ip, public_key)
+    dns = zone_text(domain, public_ip, ns1_ip, ns2_ip, public_key,
+                    mail_ipv6=public_ipv6, ns1_ipv6=ns1_ipv6, ns2_ipv6=ns2_ipv6)
     destination = Path(output).expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True, mode=0o700)
     zone_file = destination / ("db." + domain)
@@ -74,6 +77,8 @@ def prepare(domain, data, public_ip, ns1_ip, ns2_ip, vmail_uid, vmail_gid,
         "status": "STAGED_NOT_DEPLOYED",
         "domain": domain,
         "mail_host": "mail." + domain,
+        "public_mail_ip_protocol": "dual-stack" if public_ip and public_ipv6 else
+                                   ("IPv6-only" if public_ipv6 else "IPv4-only"),
         "usb_data_directory": str(data),
         "nameserver_validation": validate_result,
         "live_dns_verified": False,
@@ -102,9 +107,12 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--domain", required=True)
     p.add_argument("--data", required=True, help="Already mounted USB directory with account DB")
-    p.add_argument("--public-ip", required=True, help="Globally routable IPv4")
-    p.add_argument("--ns1-ip", required=True)
-    p.add_argument("--ns2-ip", required=True)
+    p.add_argument("--public-ip", help="Globally routable IPv4 (optional if IPv6 is provided)")
+    p.add_argument("--public-ipv6", help="Globally routable IPv6 for mail host")
+    p.add_argument("--ns1-ip", help="Global IPv4 for ns1, optional with IPv6")
+    p.add_argument("--ns2-ip", help="Global IPv4 for ns2, optional with IPv6")
+    p.add_argument("--ns1-ipv6", help="Global IPv6 for ns1")
+    p.add_argument("--ns2-ipv6", help="Global IPv6 for ns2")
     p.add_argument("--vmail-uid", type=int, required=True)
     p.add_argument("--vmail-gid", type=int, required=True)
     p.add_argument("--cert", required=True)
@@ -117,7 +125,8 @@ def main():
     manifest = prepare(args.domain, args.data, args.public_ip,
                        args.ns1_ip, args.ns2_ip, args.vmail_uid,
                        args.vmail_gid, args.cert, args.key, args.output,
-                       args.dkim_public_txt, args.mcp_cert, args.mcp_key)
+                       args.dkim_public_txt, args.mcp_cert, args.mcp_key,
+                       args.public_ipv6, args.ns1_ipv6, args.ns2_ipv6)
     print(json.dumps(manifest, indent=2))
     print("No public mail service was started. Do not expose it until every requirement is verified.")
 
