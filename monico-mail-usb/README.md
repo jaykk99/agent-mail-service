@@ -136,3 +136,52 @@ The script securely prompts for the agent's independent IMAP/SMTP password, subm
 - Maildir/SQLite on a ChromeOS-shared USB must be validated for permissions, ownership and locking under the actual `postfix` and `vmail` users.
 
 See [CHROMEBOOK.md](CHROMEBOOK.md) for Crostini-specific context.
+
+
+## 7. Check host readiness before installation and public exposure
+
+On the **actual Linux mail host** (not inside this chat), replace the sample values with real ones:
+
+```bash
+python3 selfhost/preflight.py \
+  --data "$MONICO_DATA" \
+  --domain "$MONICO_DOMAIN" \
+  --host "mail.$MONICO_DOMAIN" \
+  --public-ip "$YOUR_ACTUAL_PUBLIC_IPV4"
+```
+
+After you have real DNS records, running Postfix/Dovecot and router forwarding in place, add `--live` to check your domain's MX/NS/SPF/DMARC/PTR records and local connectivity to ports 587/993. Install `dnsutils` first (`sudo apt-get install dnsutils`). These checks deliberately **do not** claim that port 25 is reachable from the internet; verify TCP 25 from a separate outside network.
+
+A domain ending in `.invalid` is explicitly rejected for a public mail deployment. No code can make an arbitrary unregistered name globally reachable by itself.
+
+## 8. Agent tools for real self-hosted mail
+
+Once **your own** Postfix and Dovecot are working with a valid trusted TLS certificate, set:
+
+```bash
+export MONICO_MAIL_HOST="mail.$MONICO_DOMAIN"
+bash start-monico.sh
+```
+
+These MCP tools then use **each agent's own** credentials to access the local self-hosted SMTP/IMAP services:
+
+- `send_real_email(agent_id, agent_token, mail_password, recipient, subject, body)`: authenticated SMTP submission with STARTTLS to port 587; sender is the agent's own email.
+- `list_real_inbox(agent_id, agent_token, mail_password, limit=20)`: read subject/from/date over TLS using Dovecot IMAPS on port 993.
+- `read_real_email(agent_id, agent_token, mail_password, imap_uid)`: read the corresponding plain-text message from the agent's own IMAP mailbox.
+- `list_real_sent(agent_id, agent_token, limit=20)`: local history of accepted SMTP submissions. **Not** a Dovecot Sent folder.
+
+All connections use the Python standard library, require certificate verification, and contact only `mail.$MONICO_DOMAIN`. The SMTP MCP tool enforces 10 attempts per agent per hour and 1,000 attempts per host per hour, but **direct Postfix SMTP clients bypass this tool-level limit**. Enforce mail-server-level rate limits, abuse protection, and quotas separately. Do not expose the operator bearer token to agents.
+
+The old `send_internal_mail` / `list_inbox` tools use a **separate local SQLite message store**. For actual inbound internet mail, use the **real** IMAP tools above. These protocols only become operational after the real Postfix/Dovecot services are installed and configured.
+
+## 9. Before calling the project complete
+
+Run `bash run-tests.sh` and then verify a genuine mailbox with:
+
+```bash
+python3 selfhost/smoke_test.py --host "mail.$MONICO_DOMAIN" --email "agent001@$MONICO_DOMAIN"
+```
+
+For public internet delivery, also confirm independent external servers can send to your MX and receive outbound messages, that DKIM is signing, and that SPF/DMARC and reverse DNS are correct. No public service is considered live just because configuration templates were generated.
+
+**Caution:** Changing `MONICO_DOMAIN` after accounts exist is blocked to prevent silently changing their identities. Provision accounts under the real domain after delegation rather than using a placeholder as your permanent database.
