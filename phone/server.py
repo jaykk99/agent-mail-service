@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 from provision import provision
 from internal_mail import LocalMailRouter, MailError, INTERNAL_DOMAIN
 from webphone import WebPhone, WebPhoneError
+from turn_relay import client_ice_config
 
 MAX_BODY = 16384
 
@@ -176,6 +177,20 @@ def handler_factory(service, html_path):
                 return self.wfile.write(data)
             if not path.startswith('/api/'):
                 return self._reply(404, {'ok': False, 'error': 'Not found'})
+            if path == '/api/turn':
+                guest = service.webphone.authenticate_guest(self.headers.get('Authorization', ''))
+                principal = guest['address'] if guest else service.sender(
+                    self.headers.get('Authorization', ''))
+                if not principal:
+                    return self._reply(401, {'ok': False,
+                        'error': 'Authenticated agent or active guest session required'})
+                if not service.allow(principal, 'turn'):
+                    return self._reply(429, {'ok': False, 'error': 'TURN credential request limit exceeded'})
+                try:
+                    return self._reply(200, {'ok': True, **client_ice_config(principal)})
+                except (ValueError, TypeError):
+                    return self._reply(503, {'ok': False,
+                        'error': 'The self-hosted TURN relay is not configured correctly'})
             if path == '/api/webphone/guest/events':
                 guest = service.webphone.authenticate_guest(self.headers.get('Authorization', ''))
                 if not guest:
