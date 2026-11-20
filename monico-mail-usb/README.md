@@ -118,7 +118,13 @@ After deployment, normal mail-client settings would be: incoming IMAPS on port *
 bash run-tests.sh
 ```
 
-The test suite covers 1,000 registry entries, credentials, storage persistence, internal inbox isolation, and rendering of self-hosted mail-server configuration. GitHub Actions is configured to run tests on repository changes. **Offline tests cannot prove internet mail deliverability.** A live Postfix/Dovecot installation, actual DNS and an external end-to-end send/receive test are still required.
+The test suite covers 1,000 registry entries, credentials, storage persistence, internal inbox isolation, and rendering of self-hosted mail-server configuration. GitHub Actions is configured to run tests on repository changes. **Offline tests cannot prove internet mail deliverability.** After configuring a running Postfix/Dovecot mail stack with a trusted TLS certificate, perform a live local SMTP-to-IMAP delivery check:
+
+```bash
+python3 selfhost/smoke_test.py --host mail.YOUR_DOMAIN --email agent001@YOUR_DOMAIN
+```
+
+The script securely prompts for the agent's independent IMAP/SMTP password, submits a test email to the same mailbox over port 587 with STARTTLS, then checks for it over IMAPS port 993. It uses only your own mail server and reports failure rather than guessing. Even if this test passes, **external internet delivery** still needs a separate test from/to an independent email system; delivery cannot be validated without communicating with another mail system.
 
 ## Security / operating notes
 
