@@ -21,6 +21,27 @@ storage, starts the local dashboard on `127.0.0.1:8765` and mailbox MCP on
 `127.0.0.1:8787/mcp`. Restart with `bash start.sh --full up`, check
 `bash start.sh --full status`, and stop with `bash start.sh --full stop`.
 
+To **opt in to self-hosted public HTTPS** for Monico browser users:
+
+```bash
+# Replace the example with your own genuinely routable public IPv4 address.
+bash start.sh --public prepare --public-ip YOUR_ACTUAL_PUBLIC_IPV4
+bash start.sh --public up --allow-public
+bash start.sh --public doctor
+```
+
+Or start all three processes at once after installing dependencies:
+
+```bash
+bash start.sh --full up --public-ip YOUR_ACTUAL_PUBLIC_IPV4 --allow-public
+```
+
+External clients must trust the public CA certificate created by Monico,
+and a router/ISP path must actually reach Linux TCP 8766. Use the included
+independent-network `phone/probe_public.py` for a real reachability check.
+**Local startup and GitHub CI do not establish a live internet URL.**
+This HTTPS gateway does not enable ordinary public email or mobile SMS.
+
 See [Linux installation and diagnostics](linux/README.md).
 **This starts the local agent system, not public SMTP, public mobile SMS,
 public telephone numbers, or a verified outside-network service.**
