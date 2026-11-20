@@ -70,6 +70,7 @@ def zone_text(domain, mail_ip, ns1_ip, ns2_ip, dkim_key=None, serial=None):
         f"ns1    IN A  {ns1_ip}",
         f"ns2    IN A  {ns2_ip}",
         f"mail   IN A  {mail_ip}",
+        f"mcp    IN A  {mail_ip}",
         f"@      IN MX 10 mail.{domain}.",
         '@      IN TXT "v=spf1 mx -all"',
         '_dmarc IN TXT "v=DMARC1; p=none; adkim=s; aspf=s"',
