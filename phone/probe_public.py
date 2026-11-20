@@ -69,6 +69,7 @@ def run_probe(url, *, ca_file=None, agent_token=None, allow_loopback_for_tests=F
         "public_web_gateway_reachable_from_tester": True,
         "https_certificate_trusted_by_tester": True,
         "agent_count": health["agents"],
+        "server_instance_id": health.get("instanceId"),
         "anonymous_agent_api_rejected": True,
         "internet_email_verified": False,
         "carrier_sms_or_phone_verified": False,
