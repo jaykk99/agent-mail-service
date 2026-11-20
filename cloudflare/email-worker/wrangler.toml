@@ -3,11 +3,18 @@ main = "src/index.js"
 compatibility_date = "2026-11-01"
 
 [vars]
-# Backend that stores the mail. Point this at your deployment.
-INBOUND_URL = "https://agent-mail-service.onrender.com/api/inbound"
+# SECURITY: no baked-in endpoint. The historical Render backend repeatedly
+# returned HTTP 503 in independent tests and is not a verified delivery target.
+# Before deploying this OPTIONAL third-party worker, configure its own URL
+# through: npx wrangler secret put INBOUND_URL
+# The URL must point to an actually running HTTP backend implementing
+# POST /api/inbound (NOT the Python Monico MCP endpoint).
+# Leaving it unset intentionally makes the Worker refuse mail delivery
+# rather than silently send verification emails to a dead old backend.
 # Optional: push the extracted code/link straight to agent memory/database.
 # AGENT_WEBHOOK_URL = "https://your-agent.example.com/hooks/mail"
 
 # Secrets (never put values in this file):
+#   npx wrangler secret put INBOUND_URL           # verified LIVE HTTPS /api/inbound
 #   npx wrangler secret put INBOUND_SECRET        # = AGENT_MAIL_INBOUND_SECRET
 #   npx wrangler secret put AGENT_WEBHOOK_SECRET  # optional, for AGENT_WEBHOOK_URL
