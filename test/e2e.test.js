@@ -42,6 +42,11 @@ const DOMAIN = 'mail.example.test';
 const INBOUND_SECRET = 'test-inbound-secret-xyz';
 const BASE = `http://127.0.0.1:${PORT}`;
 
+// Throwaway DKIM key: the server under test signs outbound mail with it, and
+// /api/dns must publish the matching public key.
+const DKIM_KEY = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 })
+  .privateKey.export({ type: 'pkcs1', format: 'pem' });
+
 // Incoming-mail webhook listener: collects deliveries with raw bodies so
 // tests can verify the HMAC-SHA256 signature and payload shape.
 const WH_PORT = 3399;
@@ -167,6 +172,10 @@ async function waitForHealth(child, timeoutMs = 15000) {
       INCOMING_WEBHOOK_SECRET: WH_SECRET,
       SMTP_RELAY_HOST: '127.0.0.1',
       SMTP_RELAY_PORT: String(RELAY_PORT),
+      SIGNUP_PER_IP_PER_HOUR: '50',
+      DKIM_PRIVATE_KEY: DKIM_KEY,
+      DKIM_SELECTOR: 'mail',
+      DKIM_DOMAIN: DOMAIN,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -197,6 +206,100 @@ async function waitForHealth(child, timeoutMs = 15000) {
     await test('protected endpoints reject wrong token', async () => {
       const r = await fetch(`${BASE}/api/inbox/nobody@${DOMAIN}`, { headers: { Authorization: 'Bearer wrong' } });
       assert.equal(r.status, 401);
+    });
+
+    // --- Free self-serve accounts: one isolated key per agent ---
+    let accountAKey, accountBKey;
+    await test('free signup mints one API key per agent', async () => {
+      const mk = name => fetch(`${BASE}/api/accounts`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      }).then(r => r.json().then(j => ({ status: r.status, ...j })));
+      const a = await mk('agent-a');
+      const b = await mk('agent-b');
+      assert.equal(a.status, 201, JSON.stringify(a));
+      assert.ok(a.apiKey.startsWith('am_'), `key: ${a.apiKey}`);
+      assert.equal(a.account.name, 'agent-a');
+      assert.equal(a.account.plan, 'free');
+      assert.ok(a.account.addressQuota > 0);
+      assert.notEqual(a.apiKey, b.apiKey);
+      accountAKey = a.apiKey;
+      accountBKey = b.apiKey;
+
+      const me = await (await fetch(`${BASE}/api/me`, { headers: { Authorization: `Bearer ${accountAKey}` } })).json();
+      assert.equal(me.ok, true);
+      assert.equal(me.role, 'account');
+      assert.equal(me.usage.addresses, 0);
+    });
+
+    await test('account keys cannot see or send from another account address', async () => {
+      const aHeaders = { Authorization: `Bearer ${accountAKey}`, 'Content-Type': 'application/json' };
+      const bHeaders = { Authorization: `Bearer ${accountBKey}`, 'Content-Type': 'application/json' };
+      const created = await (await fetch(`${BASE}/api/addresses`, {
+        method: 'POST', headers: aHeaders, body: JSON.stringify({ prefix: 'acct-a' }),
+      })).json();
+      assert.equal(created.address, `acct-a@${DOMAIN}`);
+
+      const foreign = await fetch(`${BASE}/api/inbox/${encodeURIComponent(created.address)}`, { headers: bHeaders });
+      assert.equal(foreign.status, 404, 'a foreign inbox must not be readable');
+      const waiting = await fetch(`${BASE}/api/wait/${encodeURIComponent(created.address)}?timeoutMs=1000`, { headers: bHeaders });
+      assert.equal(waiting.status, 404);
+
+      const steal = await fetch(`${BASE}/api/send`, {
+        method: 'POST', headers: bHeaders,
+        body: JSON.stringify({ from: created.address, to: 'x@example.com', subject: 's', text: 't' }),
+      });
+      assert.equal(steal.status, 403, 'sending From a foreign address is rejected');
+
+      const claim = await fetch(`${BASE}/api/addresses`, {
+        method: 'POST', headers: bHeaders, body: JSON.stringify({ prefix: 'acct-a' }),
+      });
+      assert.equal(claim.status, 409, 'a claimed address cannot be taken over');
+
+      const other = await (await fetch(`${BASE}/api/addresses`, { headers: bHeaders })).json();
+      assert.equal(other.count, 0, 'account B sees none of account A addresses');
+      const own = await (await fetch(`${BASE}/api/addresses`, { headers: aHeaders })).json();
+      assert.deepEqual(own.addresses.map(x => x.address), [created.address]);
+    });
+
+    await test('an account receives and reads its own real SMTP mail', async () => {
+      const aHeaders = { Authorization: `Bearer ${accountAKey}` };
+      const addr = `acct-a@${DOMAIN}`;
+      await smtpSend({
+        to: addr, from: 'verify@provider.example.com', subject: 'Your Acme code',
+        body: 'Your verification code is 450199.\nhttps://provider.example.com/verify?token=acct',
+      });
+      await new Promise(r => setTimeout(r, 600));
+      const list = await (await fetch(`${BASE}/api/inbox/${encodeURIComponent(addr)}`, { headers: aHeaders })).json();
+      assert.equal(list.total, 1, JSON.stringify(list));
+      assert.deepEqual(list.emails[0].codes, ['450199']);
+      const code = await (await fetch(`${BASE}/api/code/${encodeURIComponent(addr)}`, { headers: aHeaders })).json();
+      assert.equal(code.code, '450199');
+    });
+
+    await test('account listing is admin-only and never exposes keys', async () => {
+      const denied = await fetch(`${BASE}/api/accounts`, { headers: { Authorization: `Bearer ${accountAKey}` } });
+      assert.equal(denied.status, 403);
+      const anon = await fetch(`${BASE}/api/accounts`);
+      assert.equal(anon.status, 401);
+      const all = await (await fetch(`${BASE}/api/accounts`, { headers })).json();
+      assert.equal(all.ok, true);
+      assert.ok(all.count >= 2, `accounts listed: ${all.count}`);
+      assert.ok(all.accounts.every(a => !('apiKey' in a) && !('apiKeyHash' in a)), 'keys are never listed');
+    });
+
+    await test('GET /api/dns advertises MX, SPF, DKIM and DMARC records', async () => {
+      const r = await fetch(`${BASE}/api/dns`);
+      const j = await r.json();
+      assert.equal(r.status, 200);
+      assert.ok(j.records.some(x => x.type === 'MX' && x.value === DOMAIN), 'MX record');
+      assert.ok(j.records.some(x => x.type === 'TXT' && x.value === 'v=spf1 a mx ~all'), 'SPF record');
+      assert.ok(j.records.some(x => x.name === `_dmarc.${DOMAIN}` && x.value.startsWith('v=DMARC1')), 'DMARC record');
+      const dkim = j.records.find(x => x.name === `mail._domainkey.${DOMAIN}`);
+      assert.ok(dkim, 'DKIM record present');
+      const p = /p=([A-Za-z0-9+/=]+)/.exec(dkim.value)[1];
+      const pub = crypto.createPublicKey({ key: Buffer.from(p, 'base64'), format: 'der', type: 'spki' });
+      assert.equal(pub.asymmetricKeyType, 'rsa');
     });
 
     let address;
@@ -238,6 +341,8 @@ async function waitForHealth(child, timeoutMs = 15000) {
       assert.deepEqual(relayMail[0].to, ['dest@example.com']);
       assert.ok(relayMail[0].data.includes('Subject: Hello from the agent'), 'relay DATA carries the subject');
       assert.ok(relayMail[0].data.includes('sent body here'), 'relay DATA carries the body');
+      assert.ok(relayMail[0].data.includes('DKIM-Signature:'), 'outbound mail is DKIM-signed');
+      assert.ok(relayMail[0].data.includes(`d=${DOMAIN}`), 'DKIM signature names the domain');
     });
 
     await test('POST /api/send rejects a foreign From address', async () => {
@@ -716,6 +821,7 @@ async function waitForHealth(child, timeoutMs = 15000) {
           ...process.env, PORT: String(rPort), SMTP_PORT: String(rSmtp),
           AGENT_MAIL_TOKEN: TOKEN, MAIL_DOMAIN: DOMAIN,
           ADDRESS_CREATE_MAX_PER_HOUR: '2', EMAILS_PER_ADDRESS_PER_HOUR: '2',
+          ADDRESS_QUOTA_PER_ACCOUNT: '1',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -731,6 +837,20 @@ async function waitForHealth(child, timeoutMs = 15000) {
         const limited = await mk('rl3');
         assert.equal(limited.status, 429, '3rd creation should be rate limited');
         assert.ok(limited.headers.get('retry-after'), '429 carries Retry-After');
+
+        // per-account standing address quota (ADDRESS_QUOTA_PER_ACCOUNT=1)
+        const signupRes = await fetch(`${rBase}/api/accounts`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: 'quota-agent' }),
+        });
+        assert.equal(signupRes.status, 201, 'signup works on a fresh server');
+        const acctKey = (await signupRes.json()).apiKey;
+        const ah = { Authorization: `Bearer ${acctKey}`, 'Content-Type': 'application/json' };
+        const mkAcct = p => fetch(`${rBase}/api/addresses`, { method: 'POST', headers: ah, body: JSON.stringify({ prefix: p }) });
+        assert.equal((await mkAcct('q1')).status, 200);
+        const over = await mkAcct('q2');
+        assert.equal(over.status, 403, 'second address exceeds the per-account quota');
+        assert.equal((await over.json()).quota, 1);
 
         // per-address SMTP receive limit: 2 stored, 3rd dropped
         const rAddr = `rllimit@${DOMAIN}`;

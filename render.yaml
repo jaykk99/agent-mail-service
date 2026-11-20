@@ -31,3 +31,15 @@ services:
         sync: false
       - key: SEND_MAX_PER_HOUR
         value: "100"
+      - key: SIGNUP_OPEN
+        value: "1"
+      - key: ADDRESS_QUOTA_PER_ACCOUNT
+        value: "25"
+      - key: DKIM_DOMAIN
+        sync: false # defaults to MAIL_DOMAIN
+      - key: DKIM_SELECTOR
+        value: "mail"
+      - key: DKIM_PRIVATE_KEY
+        sync: false # PEM RSA key from `openssl genrsa -out dkim.pem 2048`
+      - key: DMARC_POLICY
+        value: "none"

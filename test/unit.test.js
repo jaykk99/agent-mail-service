@@ -21,6 +21,10 @@ const {
   sendAgentMail,
   setSendTransport,
   registerAddress,
+  newApiKey,
+  hashApiKey,
+  newAccountRow,
+  dkimPublicKeyRecord,
 } = require('../server.js');
 
 let failures = 0;
@@ -170,6 +174,37 @@ test('backoffMs grows exponentially and stays capped', () => {
   assert.ok(b1 >= 2000 && b1 <= 2500, `attempt 1: ${b1}`);
   assert.ok(b2 >= 4000 && b2 <= 5000, `attempt 2: ${b2}`);
   assert.ok(b9 <= 75000, `capped: ${b9}`);
+});
+
+test('newApiKey is prefixed, long and unique', () => {
+  const keys = new Set();
+  for (let i = 0; i < 50; i++) {
+    const k = newApiKey();
+    assert.match(k, /^am_[A-Za-z0-9_-]{30,}$/);
+    keys.add(k);
+  }
+  assert.equal(keys.size, 50, 'every minted key is unique');
+});
+
+test('hashApiKey is deterministic and hides the key', () => {
+  const key = newApiKey();
+  assert.equal(hashApiKey(key), hashApiKey(key));
+  assert.match(hashApiKey(key), /^[0-9a-f]{64}$/);
+  assert.notEqual(hashApiKey(key), key);
+  assert.notEqual(hashApiKey(key), hashApiKey(newApiKey()));
+});
+
+test('newAccountRow stores only a hash of the account key', () => {
+  const { account, apiKey } = newAccountRow({ name: 'Agent <One>!' });
+  assert.equal(account.name, 'Agent One');
+  assert.equal(account.plan, 'free');
+  assert.equal(account.apiKeyHash, hashApiKey(apiKey));
+  assert.ok(!JSON.stringify(account).includes(apiKey), 'raw key must never be stored');
+  assert.ok(apiKey.startsWith(account.apiKeyPrefix));
+});
+
+test('dkimPublicKeyRecord is empty when no key is configured', () => {
+  assert.equal(dkimPublicKeyRecord(), '');
 });
 
 if (failures > 0) {

@@ -6,6 +6,10 @@
  * without depending on Gmail or temp-mail services.
  *
  * Endpoints:
+ *   POST /api/accounts           { name? } -> { account, apiKey } (free signup)
+ *   GET  /api/me                 -> calling account + usage (or master summary)
+ *   GET  /api/accounts           -> every account with usage (master only)
+ *   GET  /api/dns                -> MX/SPF/DKIM/DMARC records to publish
  *   POST /api/addresses          { prefix } -> { address }
  *   GET  /api/addresses          -> known addresses with inbox counts
  *   POST /api/send               { from, to, subject, text, html? } -> { messageId }
@@ -31,7 +35,11 @@
  * return 429. Pagination precedence: if limit/offset are present they win,
  * otherwise page/per_page are used.
  *
- * Auth: Bearer token from AGENT_MAIL_TOKEN env var.
+ * Auth: Bearer token. AGENT_MAIL_TOKEN is the master (admin) key and sees
+ * every address. POST /api/accounts mints a free per-agent account + API key
+ * (only its SHA-256 hash is stored); an account key sees only the addresses
+ * that account created and can only send From them. Addresses created with
+ * the master token are owned by "master" and stay invisible to accounts.
  *
  * Storage: Supabase table `agent_emails` when SUPABASE_URL and
  * SUPABASE_SERVICE_KEY are set; otherwise falls back to an in-memory
@@ -97,6 +105,52 @@ const SMTP_RELAY_PASS = process.env.SMTP_RELAY_PASS || '';
 // Hourly outbound-send quota per From address (0 disables).
 const SEND_MAX_PER_HOUR = numEnv('SEND_MAX_PER_HOUR', 100);
 
+// --- Accounts: a free, isolated mailbox per agent (thousands of agents) ---
+// Self-serve signup mints an account + API key. Open by default — this is a
+// free service — and bounded per IP and globally so one client cannot
+// exhaust the domain. Set SIGNUP_OPEN=0 to require the master token.
+const SIGNUP_OPEN = String(process.env.SIGNUP_OPEN ?? '1') !== '0';
+const SIGNUP_PER_IP_PER_HOUR = numEnv('SIGNUP_PER_IP_PER_HOUR', 5);
+const SIGNUP_MAX_PER_HOUR = numEnv('SIGNUP_MAX_PER_HOUR', 500);
+// Addresses one account may own at a time (the master token is unlimited).
+const ADDRESS_QUOTA_PER_ACCOUNT = numEnv('ADDRESS_QUOTA_PER_ACCOUNT', 25);
+// Reserved owner id for addresses created with the master token.
+const OWNER_MASTER = 'master';
+// DMARC policy advertised by GET /api/dns. Start at "none" (report only),
+// move to "quarantine" once DKIM signing has been verified.
+const DMARC_POLICY = String(process.env.DMARC_POLICY || 'none').trim();
+
+// --- DKIM: sign outbound mail so receivers can verify it is really ours ---
+// DKIM_PRIVATE_KEY is a PEM RSA private key (literal newlines or \n escapes).
+const DKIM_DOMAIN = String(process.env.DKIM_DOMAIN || DOMAIN).trim().toLowerCase();
+const DKIM_SELECTOR = String(process.env.DKIM_SELECTOR || 'mail').trim();
+const DKIM_PRIVATE_KEY = String(process.env.DKIM_PRIVATE_KEY || '').replace(/\\n/g, '\n').trim();
+
+// The public half of the key, ready for the DNS TXT record. Derived from the
+// private key so the two can never drift apart.
+function dkimPublicKeyRecord() {
+  if (!DKIM_PRIVATE_KEY) return '';
+  try {
+    return crypto.createPublicKey(DKIM_PRIVATE_KEY)
+      .export({ type: 'spki', format: 'der' })
+      .toString('base64');
+  } catch {
+    return '';
+  }
+}
+
+function validateDkimConfig() {
+  if (!DKIM_PRIVATE_KEY) return { status: 'unconfigured', publicKey: '' };
+  const publicKey = dkimPublicKeyRecord();
+  if (!publicKey) {
+    console.warn('[dkim] DKIM_PRIVATE_KEY is set but is not a usable PEM RSA private key — outbound mail will NOT be signed');
+    return { status: 'misconfigured', publicKey: '' };
+  }
+  console.log(`[dkim] signing outbound mail as ${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN}`);
+  return { status: 'configured', publicKey };
+}
+const DKIM_STATUS = validateDkimConfig();
+
 function validateRelayConfig() {
   if (!SMTP_RELAY_HOST) return { status: 'unconfigured', problems: [] };
   const problems = [];
@@ -134,6 +188,12 @@ function getSendTransport() {
     port: SMTP_RELAY_PORT,
     secure: SMTP_RELAY_PORT === 465,
     auth: SMTP_RELAY_USER ? { user: SMTP_RELAY_USER, pass: SMTP_RELAY_PASS } : undefined,
+    // Transport-level DKIM options are domainName/keySelector (the mail-level
+    // ones are domain/selector); with the wrong names the signature is emitted
+    // with an empty d=.
+    dkim: DKIM_STATUS.status === 'configured'
+      ? { domainName: DKIM_DOMAIN, keySelector: DKIM_SELECTOR, privateKey: DKIM_PRIVATE_KEY }
+      : undefined,
   });
   return sendTransport;
 }
@@ -190,11 +250,18 @@ function validateSendBody(body) {
 
 // Core outbound send. Throws an Error with .status for HTTP mapping.
 // The From address must be one this service created (in the address
-// registry); foreign From values are rejected so the service can never
-// be used to send mail as someone else.
-async function sendAgentMail({ from, to, subject, text, html }) {
-  if (!addressRegistry.has(from)) {
+// registry) and, for account keys, one the caller owns; foreign From values
+// are rejected so the service can never be used to send mail as someone else.
+async function sendAgentMail({ from, to, subject, text, html }, actor) {
+  const role = actor && actor.role ? actor.role : 'master';
+  const owner = await ownershipFor(from);
+  if (owner === undefined) {
     const err = new Error('from address was not created by this service');
+    err.status = 403;
+    throw err;
+  }
+  if (role !== 'master' && (!actor || !actor.account || owner !== actor.account.id)) {
+    const err = new Error('from address is owned by another account');
     err.status = 403;
     throw err;
   }
@@ -239,18 +306,224 @@ if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
 }
 const useSupabase = !!supabase;
 
+// --- Accounts: one free, isolated mailbox per agent ---
+// Each account holds one API key and only its SHA-256 hash is stored, so a
+// database leak never exposes a working credential. The key is shown once,
+// at signup. `master` is the reserved owner of addresses created with
+// AGENT_MAIL_TOKEN; it is never a real account.
+const API_KEY_PREFIX = 'am_';
+const accountByHash = new Map(); // hash -> { at, account } (Supabase cache)
+const accountsById = new Map(); // in-memory fallback
+const ACCOUNT_CACHE_MS = 60 * 1000;
+
+function newApiKey() {
+  return API_KEY_PREFIX + crypto.randomBytes(24).toString('base64url');
+}
+
+function hashApiKey(key) {
+  return crypto.createHash('sha256').update(String(key)).digest('hex');
+}
+
+function publicAccount(a) {
+  return {
+    id: a.id,
+    name: a.name,
+    plan: a.plan,
+    createdAt: a.createdAt,
+    addressQuota: a.addressQuota,
+  };
+}
+
+function accountFromRow(row) {
+  return {
+    id: row.id,
+    name: row.name || 'agent',
+    plan: row.plan || 'free',
+    apiKeyHash: row.api_key_hash,
+    apiKeyPrefix: row.api_key_prefix || '',
+    createdAt: row.created_at,
+    addressQuota: Number(row.address_quota) || ADDRESS_QUOTA_PER_ACCOUNT,
+  };
+}
+
+// Mint an account + its one-and-only API key (not persisted).
+function newAccountRow({ name } = {}) {
+  const apiKey = newApiKey();
+  const now = new Date().toISOString();
+  const account = {
+    id: `acct_${crypto.randomBytes(8).toString('hex')}`,
+    name: String(name || 'agent').replace(/[^A-Za-z0-9 ._@-]/g, '').trim().slice(0, 60) || 'agent',
+    plan: 'free',
+    apiKeyHash: hashApiKey(apiKey),
+    apiKeyPrefix: apiKey.slice(0, API_KEY_PREFIX.length + 6),
+    createdAt: now,
+    addressQuota: ADDRESS_QUOTA_PER_ACCOUNT,
+  };
+  return { account, apiKey };
+}
+
+async function createAccount({ name } = {}) {
+  const { account, apiKey } = newAccountRow({ name });
+  if (useSupabase) {
+    const { error } = await supabase.from('agent_accounts').insert({
+      id: account.id,
+      name: account.name,
+      plan: account.plan,
+      api_key_hash: account.apiKeyHash,
+      api_key_prefix: account.apiKeyPrefix,
+      created_at: account.createdAt,
+      address_quota: account.addressQuota,
+    });
+    if (error) throw new Error(`account store failed (run supabase-migration.sql): ${error.message}`);
+  } else {
+    accountsById.set(account.id, account);
+  }
+  accountByHash.set(account.apiKeyHash, { at: Date.now(), account });
+  console.log(JSON.stringify({ level: 'info', type: 'account-created', id: account.id }));
+  return { account, apiKey };
+}
+
+async function findAccountByKeyHash(hash) {
+  const cached = accountByHash.get(hash);
+  if (cached && Date.now() - cached.at < ACCOUNT_CACHE_MS) return cached.account;
+  if (useSupabase) {
+    const { data, error } = await supabase
+      .from('agent_accounts')
+      .select('*')
+      .eq('api_key_hash', hash)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return null;
+    const account = accountFromRow(data);
+    accountByHash.set(hash, { at: Date.now(), account });
+    return account;
+  }
+  for (const account of accountsById.values()) {
+    if (account.apiKeyHash === hash) return account;
+  }
+  return null;
+}
+
+async function allAccounts() {
+  if (useSupabase) {
+    const { data, error } = await supabase
+      .from('agent_accounts')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(5000);
+    if (error) throw error;
+    return (data || []).map(accountFromRow);
+  }
+  return [...accountsById.values()].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+}
+
+async function countAccounts() {
+  if (useSupabase) {
+    const { count, error } = await supabase
+      .from('agent_accounts')
+      .select('id', { count: 'exact', head: true });
+    if (error) throw error;
+    return count || 0;
+  }
+  return accountsById.size;
+}
+
+async function accountAddressCount(accountId) {
+  if (useSupabase) {
+    const { count, error } = await supabase
+      .from('agent_addresses')
+      .select('address', { count: 'exact', head: true })
+      .eq('account_id', accountId);
+    if (error) throw error;
+    return count || 0;
+  }
+  let n = 0;
+  for (const meta of addressRegistry.values()) {
+    if (meta.accountId === accountId) n++;
+  }
+  return n;
+}
+
+async function listAccountsWithUsage() {
+  const accounts = await allAccounts();
+  return Promise.all(accounts.map(async a => ({
+    ...publicAccount(a),
+    apiKeyPrefix: a.apiKeyPrefix,
+    addresses: await accountAddressCount(a.id).catch(() => 0),
+  })));
+}
+
 // In-memory fallback: address -> [{ id, from, subject, date, text, links, attachments }]
 const inboxes = new Map();
 
-// --- Address registry: tracks creation/last activity for TTL cleanup ---
-// address -> { createdAt, lastSeenAt } (ISO strings)
+// --- Address registry: owner + creation/last activity (TTL cleanup) ---
+// address -> { accountId, createdAt, lastSeenAt }. accountId is undefined
+// while ownership is unknown, null for catch-all mail nobody claimed,
+// OWNER_MASTER for addresses created with the master token, else an account id.
 const addressRegistry = new Map();
 
-function registerAddress(address) {
+// Persist an address (and its owner) when Supabase is configured, so
+// ownership survives restarts. Fire-and-forget: mail never waits on it.
+async function persistAddress(address, accountId) {
+  if (!useSupabase) return;
+  const now = new Date().toISOString();
+  // Insert-if-absent first, so an existing row keeps its created_at and
+  // owner. `ignoreDuplicates` makes this ON CONFLICT DO NOTHING.
+  const { error } = await supabase.from('agent_addresses')
+    .upsert({ address, last_seen_at: now }, { onConflict: 'address', ignoreDuplicates: true });
+  if (error) throw error;
+  const patch = { last_seen_at: now };
+  if (typeof accountId === 'string' && accountId) patch.account_id = accountId;
+  const { error: updateError } = await supabase.from('agent_addresses')
+    .update(patch).eq('address', address);
+  if (updateError) throw updateError;
+}
+
+function registerAddress(address, accountId) {
   const now = new Date().toISOString();
   const entry = addressRegistry.get(address);
-  if (entry) entry.lastSeenAt = now;
-  else addressRegistry.set(address, { createdAt: now, lastSeenAt: now });
+  if (entry) {
+    entry.lastSeenAt = now;
+    if (entry.accountId === undefined && accountId !== undefined) entry.accountId = accountId;
+  } else {
+    addressRegistry.set(address, { accountId, createdAt: now, lastSeenAt: now });
+  }
+  persistAddress(address, accountId).catch(err => {
+    console.warn(`[storage] address persist failed for ${address}: ${err.message}`);
+  });
+}
+
+// Who owns this address? An account id, OWNER_MASTER, null (unowned), or
+// undefined (unknown to this service). Supabase rows are authoritative after
+// a restart; the result is cached in the registry.
+async function ownershipFor(address) {
+  const meta = addressRegistry.get(address);
+  if (meta && meta.accountId !== undefined) return meta.accountId;
+  if (useSupabase) {
+    const { data, error } = await supabase
+      .from('agent_addresses').select('account_id').eq('address', address).maybeSingle();
+    if (error) throw error;
+    if (data) {
+      const owner = data.account_id || null;
+      if (meta) meta.accountId = owner;
+      else addressRegistry.set(address, {
+        accountId: owner,
+        createdAt: new Date().toISOString(),
+        lastSeenAt: new Date().toISOString(),
+      });
+      return owner;
+    }
+  }
+  return meta ? null : undefined;
+}
+
+// An address is visible to the master token, or to the account that owns it.
+// Foreign addresses answer 404 so an account cannot probe for others' mail.
+async function canAccessAddress(req, address) {
+  if (req.auth && req.auth.role === 'master') return true;
+  if (!req.auth || !req.auth.account) return false;
+  const owner = await ownershipFor(address);
+  return typeof owner === 'string' && owner === req.auth.account.id;
 }
 
 function addressInfo(address) {
@@ -452,8 +725,14 @@ async function sweepExpiredAddresses() {
       addressRegistry.delete(addr);
       inboxes.delete(addr);
       rateBuckets.delete(`recv:${addr}`);
+      rateBuckets.delete(`send:${addr}`);
       removed++;
     }
+  }
+  // Drop expired per-IP counters so a long-running service does not grow
+  // them without bound.
+  for (const [key, entry] of bucketState) {
+    if (entry.resetAt < Date.now() - 60 * 60 * 1000) bucketState.delete(key);
   }
   let rows = 0;
   if (useSupabase) {
@@ -466,6 +745,12 @@ async function sweepExpiredAddresses() {
     } else {
       rows = count || 0;
     }
+    // Retire the address rows too, so ownership of a dead address is not
+    // kept forever (ignored when the migration has not been applied).
+    await supabase.from('agent_addresses')
+      .delete().lt('last_seen_at', cutoff.toISOString())
+      .then(r => r.error && console.error('[ttl] address cleanup error:', r.error.message))
+      .catch(() => {});
   }
   if (removed || rows) console.log(`[ttl] swept ${removed} address(es), ${rows} old row(s)`);
   return { removed, rows };
@@ -650,9 +935,52 @@ async function clearInbox(address) {
 // registry is lost on restart (Render free instances sleep after 15 idle
 // minutes), so with Supabase the list is rebuilt from stored mail and then
 // merged with addresses created since boot that have no mail yet.
-async function knownAddresses() {
-  const out = new Map(); // address -> { address, createdAt, lastSeenAt, emails }
+async function knownAddresses(actor) {
+  const master = !actor || actor.role === 'master';
+  const accountId = master ? null : actor.account.id;
+  const out = new Map(); // address -> { address, accountId, createdAt, lastSeenAt, emails }
+
   if (useSupabase) {
+    let q = supabase
+      .from('agent_addresses')
+      .select('address, account_id, created_at, last_seen_at')
+      .order('last_seen_at', { ascending: false })
+      .limit(5000);
+    if (!master) q = q.eq('account_id', accountId);
+    const { data, error } = await q;
+    if (error) throw error;
+    for (const r of data || []) {
+      out.set(r.address, {
+        address: r.address,
+        accountId: r.account_id || null,
+        createdAt: r.created_at,
+        lastSeenAt: r.last_seen_at,
+        emails: 0,
+      });
+    }
+  }
+
+  for (const [address, meta] of addressRegistry) {
+    if (!master && meta.accountId !== accountId) continue;
+    const cur = out.get(address);
+    if (cur) {
+      if (meta.createdAt && (!cur.createdAt || meta.createdAt < cur.createdAt)) cur.createdAt = meta.createdAt;
+      if (meta.lastSeenAt && (!cur.lastSeenAt || meta.lastSeenAt > cur.lastSeenAt)) cur.lastSeenAt = meta.lastSeenAt;
+      if (cur.accountId == null && meta.accountId) cur.accountId = meta.accountId;
+    } else {
+      out.set(address, {
+        address,
+        accountId: meta.accountId === undefined ? null : meta.accountId,
+        createdAt: meta.createdAt,
+        lastSeenAt: meta.lastSeenAt,
+        emails: (inboxes.get(address) || []).length,
+      });
+    }
+  }
+
+  // Legacy rows: mail stored before the address table existed, plus catch-all
+  // mail to an address nobody claimed. Only the master token may see those.
+  if (master && useSupabase) {
     const { data, error } = await supabase
       .from('agent_emails')
       .select('address, created_at')
@@ -661,29 +989,72 @@ async function knownAddresses() {
     if (error) throw error;
     for (const r of data || []) {
       const cur = out.get(r.address);
-      if (cur) { cur.emails++; cur.createdAt = r.created_at; }
-      else out.set(r.address, { address: r.address, createdAt: r.created_at, lastSeenAt: r.created_at, emails: 1 });
+      if (cur) {
+        cur.emails++;
+        if (!cur.createdAt) cur.createdAt = r.created_at;
+      } else {
+        out.set(r.address, {
+          address: r.address,
+          accountId: null,
+          createdAt: r.created_at,
+          lastSeenAt: r.created_at,
+          emails: 1,
+        });
+      }
     }
+    return [...out.values()].sort((a, b) => (a.lastSeenAt < b.lastSeenAt ? 1 : -1));
   }
-  for (const [address, meta] of addressRegistry) {
-    const cur = out.get(address);
-    if (cur) {
-      if (meta.createdAt < cur.createdAt) cur.createdAt = meta.createdAt;
-      if (meta.lastSeenAt > cur.lastSeenAt) cur.lastSeenAt = meta.lastSeenAt;
-    } else {
-      out.set(address, { address, createdAt: meta.createdAt, lastSeenAt: meta.lastSeenAt, emails: (inboxes.get(address) || []).length });
+
+  if (useSupabase) {
+    // Count mail per address in a few batched reads instead of one query each.
+    const addrs = [...out.keys()];
+    const counts = new Map();
+    for (let i = 0; i < addrs.length; i += 200) {
+      const chunk = addrs.slice(i, i + 200);
+      const { data, error } = await supabase
+        .from('agent_emails')
+        .select('address')
+        .in('address', chunk)
+        .limit(20000);
+      if (error) throw error;
+      for (const r of data || []) counts.set(r.address, (counts.get(r.address) || 0) + 1);
     }
+    for (const [address, info] of out) info.emails = counts.get(address) || 0;
   }
+
   return [...out.values()].sort((a, b) => (a.lastSeenAt < b.lastSeenAt ? 1 : -1));
 }
 
-async function countAddresses() {
-  return (await knownAddresses()).length;
+async function countAddresses(actor) {
+  return (await knownAddresses(actor || { role: 'master' })).length;
+}
+
+// Resolve a request's Bearer credential to the master key or an account.
+async function resolveAuth(req) {
+  const header = req.headers.authorization;
+  if (bearerOk(header, TOKEN)) return { role: 'master' };
+  const m = /^Bearer\s+(\S+)$/i.exec(String(header || ''));
+  if (!m) return null;
+  const account = await findAccountByKeyHash(hashApiKey(m[1]));
+  return account ? { role: 'account', account } : null;
 }
 
 function auth(req, res, next) {
-  if (!bearerOk(req.headers.authorization, TOKEN)) {
-    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  resolveAuth(req)
+    .then(who => {
+      if (!who) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+      req.auth = who;
+      next();
+    })
+    .catch(err => {
+      console.error(`[auth] ${err.message}`);
+      res.status(500).json({ ok: false, error: 'Auth lookup failed' });
+    });
+}
+
+function requireMaster(req, res, next) {
+  if (!req.auth || req.auth.role !== 'master') {
+    return res.status(403).json({ ok: false, error: 'Master token required' });
   }
   next();
 }
@@ -886,7 +1257,9 @@ const smtp = new SMTPServer({
           const links = extractLinks(`${parsed.subject || ''}\n${bodyText}`, html);
           const attachments = extractAttachments(parsed);
           for (const addr of toAddrs) {
-            registerAddress(addr);
+            // Resolve ownership first so mail to an account's address keeps
+            // belonging to that account after a restart.
+            registerAddress(addr, await ownershipFor(addr));
             const dedupeKey = seenKey(addr, parsed.messageId);
             if (dedupeKey && seenMessages.has(dedupeKey)) continue;
             if (rateLimitExceeded(`recv:${addr}`, EMAILS_PER_ADDRESS_PER_HOUR)) {
@@ -936,7 +1309,11 @@ app.get('/health', async (req, res) => {
       ok: true,
       domain: DOMAIN,
       storage: useSupabase ? 'supabase' : 'memory',
-      addresses: await countAddresses(),
+      addresses: await countAddresses().catch(() => null),
+      accounts: await countAccounts().catch(() => null),
+      signup: SIGNUP_OPEN ? 'open' : 'closed',
+      dkim: DKIM_STATUS.status,
+      addressQuotaPerAccount: ADDRESS_QUOTA_PER_ACCOUNT,
       relay: RELAY_STATUS.status,
       httpInbound: INBOUND_SECRET ? 'secret' : 'api-token',
       webhook: WEBHOOK_URL ? 'configured' : 'disabled',
@@ -948,6 +1325,29 @@ app.get('/health', async (req, res) => {
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+// DNS records a domain owner must publish for this service to send and
+// receive real internet mail. Public by design: DNS is public, and this lets
+// a fresh deployment go live without transcribing values by hand. The DKIM
+// record is derived from DKIM_PRIVATE_KEY, so it can never drift.
+app.get('/api/dns', (req, res) => {
+  const host = String(process.env.MX_HOST || DOMAIN).trim().toLowerCase();
+  const records = [
+    { type: 'MX', name: DOMAIN, priority: 10, value: host, purpose: 'deliver inbound mail to this host' },
+    { type: 'A', name: host, value: '<public IP of the host running server.js>', purpose: 'the mail host must resolve' },
+    { type: 'TXT', name: DOMAIN, value: 'v=spf1 a mx ~all', purpose: 'SPF — only this host may send as the domain' },
+    { type: 'TXT', name: `_dmarc.${DOMAIN}`, value: `v=DMARC1; p=${DMARC_POLICY}; rua=mailto:dmarc@${DOMAIN}`, purpose: 'DMARC policy + aggregate reports' },
+  ];
+  if (DKIM_STATUS.publicKey) {
+    records.push({
+      type: 'TXT',
+      name: `${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN}`,
+      value: `v=DKIM1; k=rsa; p=${DKIM_STATUS.publicKey}`,
+      purpose: 'DKIM — lets receivers verify our outbound signatures',
+    });
+  }
+  res.json({ ok: true, domain: DOMAIN, dkim: DKIM_STATUS.status, records });
 });
 
 // HTTP inbound: the Cloudflare Email Worker POSTs parsed mail here because
@@ -975,7 +1375,8 @@ app.post('/api/inbound', async (req, res) => {
   if (dedupeKey && seenMessages.has(dedupeKey)) {
     return res.json({ ok: true, stored: true, duplicate: true, id: seenMessages.get(dedupeKey) });
   }
-  registerAddress(to);
+  const toOwner = await ownershipFor(to);
+  registerAddress(to, toOwner === undefined ? null : toOwner);
   if (rateLimitExceeded(`recv:${to}`, EMAILS_PER_ADDRESS_PER_HOUR)) {
     console.warn(`[inbound] per-address receive rate limit hit for ${to}, email dropped`);
     return res.json({ ok: true, stored: false, error: 'rate-limited' });
@@ -1010,31 +1411,135 @@ app.post('/api/inbound', async (req, res) => {
   }
 });
 
-// Create a new email address. BOTH creation limits apply: the per-IP
-// per-minute limit (middleware) and the global hourly quota (handler).
-app.post('/api/addresses', auth, addressRateLimit, (req, res) => {
-  if (rateLimitExceeded('create:global', ADDRESS_CREATE_MAX_PER_HOUR)) {
-    res.setHeader('Retry-After', '3600');
-    return res.status(429).json({ ok: false, error: 'Address creation rate limit exceeded. Try again later.' });
+// Create a new email address owned by the caller. BOTH creation limits
+// apply: the per-IP per-minute limit (middleware) and the per-account hourly
+// quota (handler). Accounts also have a standing address quota; the master
+// token is unlimited.
+app.post('/api/addresses', auth, addressRateLimit, async (req, res) => {
+  try {
+    const actor = req.auth;
+    const quotaKey = actor.role === 'master' ? 'create:master' : `create:${actor.account.id}`;
+    if (rateLimitExceeded(quotaKey, ADDRESS_CREATE_MAX_PER_HOUR)) {
+      res.setHeader('Retry-After', '3600');
+      return res.status(429).json({ ok: false, error: 'Address creation rate limit exceeded. Try again later.' });
+    }
+    let prefix = String(req.body.prefix || `agent${Date.now().toString(36)}`)
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]/g, '')
+      .slice(0, 64);
+    // Fall back to a generated prefix if the sanitized input is empty
+    if (!prefix) prefix = `agent${Date.now().toString(36)}`;
+    const address = `${prefix}@${DOMAIN}`;
+
+    const owner = await ownershipFor(address);
+    if (typeof owner === 'string' && actor.role !== 'master' && owner !== actor.account.id) {
+      return res.status(409).json({ ok: false, error: 'That address is already claimed by another account' });
+    }
+
+    if (actor.role === 'master') {
+      // Keep an existing account's claim; otherwise the master owns it.
+      registerAddress(address, typeof owner === 'string' ? owner : OWNER_MASTER);
+    } else {
+      const used = await accountAddressCount(actor.account.id);
+      if (used >= actor.account.addressQuota) {
+        return res.status(403).json({
+          ok: false,
+          error: `Address quota reached (${actor.account.addressQuota} per account)`,
+          quota: actor.account.addressQuota,
+          used,
+        });
+      }
+      registerAddress(address, actor.account.id);
+    }
+    // No DB write needed until mail arrives; memory path keeps a local entry
+    if (!useSupabase && !inboxes.has(address)) inboxes.set(address, []);
+    res.json({ ok: true, address, owner: actor.role === 'master' ? OWNER_MASTER : actor.account.id });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
   }
-  let prefix = String(req.body.prefix || `agent${Date.now().toString(36)}`)
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]/g, '')
-    .slice(0, 64);
-  // Fall back to a generated prefix if the sanitized input is empty
-  if (!prefix) prefix = `agent${Date.now().toString(36)}`;
-  const address = `${prefix}@${DOMAIN}`;
-  // No DB write needed until mail arrives; memory path keeps a local entry
-  if (!useSupabase && !inboxes.has(address)) inboxes.set(address, []);
-  registerAddress(address);
-  res.json({ ok: true, address });
 });
 
-// List known addresses (registry) with inbox counts
+// List the addresses the caller may see, with inbox counts.
 app.get('/api/addresses', auth, async (req, res) => {
   try {
-    const list = await knownAddresses();
+    const list = await knownAddresses(req.auth);
     res.json({ ok: true, count: list.length, addresses: list });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Free self-serve signup: one agent, one API key, one isolated namespace.
+// Open by default; the master token can always create accounts. The API key
+// is returned exactly once, and only its hash is stored.
+app.post('/api/accounts', addressRateLimit, async (req, res) => {
+  try {
+    const admin = bearerOk(req.headers.authorization, TOKEN);
+    if (!admin) {
+      if (!SIGNUP_OPEN) {
+        return res.status(403).json({ ok: false, error: 'Signup is closed; an admin must create accounts' });
+      }
+      const ip = req.ip || req.socket.remoteAddress || 'unknown';
+      if (!rateLimitWindow(`signup:${ip}`, SIGNUP_PER_IP_PER_HOUR, 60 * 60 * 1000)) {
+        res.setHeader('Retry-After', '3600');
+        return res.status(429).json({ ok: false, error: 'Too many accounts from this IP — try again later' });
+      }
+      if (rateLimitExceeded('signup:global', SIGNUP_MAX_PER_HOUR)) {
+        res.setHeader('Retry-After', '3600');
+        return res.status(429).json({ ok: false, error: 'Signup capacity reached — try again later' });
+      }
+    }
+    const { account, apiKey } = await createAccount({ name: (req.body || {}).name });
+    res.status(201).json({
+      ok: true,
+      apiKey,
+      account: publicAccount(account),
+      limits: {
+        addressQuota: account.addressQuota,
+        emailsPerAddressPerHour: EMAILS_PER_ADDRESS_PER_HOUR,
+        sendPerHour: SEND_MAX_PER_HOUR,
+      },
+      note: 'Store this API key now — it is shown once. Use it as Authorization: Bearer <apiKey>.',
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// The caller's own account + usage (works for the master token too).
+app.get('/api/me', auth, async (req, res) => {
+  try {
+    if (req.auth.role === 'master') {
+      return res.json({
+        ok: true,
+        role: 'master',
+        domain: DOMAIN,
+        addresses: await countAddresses(),
+        accounts: await countAccounts().catch(() => null),
+      });
+    }
+    const account = req.auth.account;
+    res.json({
+      ok: true,
+      role: 'account',
+      domain: DOMAIN,
+      account: { ...publicAccount(account), apiKeyPrefix: account.apiKeyPrefix },
+      usage: {
+        addresses: await accountAddressCount(account.id),
+        addressQuota: account.addressQuota,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Every account with usage — admin only. API keys are never returned, only
+// their prefixes so an operator can tell accounts apart.
+app.get('/api/accounts', auth, requireMaster, async (req, res) => {
+  try {
+    const accounts = await listAccountsWithUsage();
+    res.json({ ok: true, count: accounts.length, accounts });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -1048,7 +1553,7 @@ app.post('/api/send', auth, async (req, res) => {
   try {
     const v = validateSendBody(req.body || {});
     if (!v.ok) return res.status(400).json({ ok: false, error: v.error });
-    const result = await sendAgentMail(v.value);
+    const result = await sendAgentMail(v.value, req.auth);
     res.json({ ok: true, from: v.value.from, to: v.value.to, ...result });
   } catch (err) {
     if (err.status === 429) res.setHeader('Retry-After', '3600');
@@ -1066,6 +1571,9 @@ app.get('/api/inbox/:address', auth, async (req, res) => {
     const addr = decodeURIComponent(req.params.address).toLowerCase();
     if (!validAddressParam(addr)) {
       return res.status(400).json({ ok: false, error: 'Invalid address format' });
+    }
+    if (!(await canAccessAddress(req, addr))) {
+      return res.status(404).json({ ok: false, error: 'Not found' });
     }
     const hasLimitOffset = req.query.limit !== undefined || req.query.offset !== undefined;
     const { emails, total, page, perPage, pages, limit, offset } = await listEmails(addr, {
@@ -1112,6 +1620,9 @@ app.get('/api/inbox/:address/:id', auth, async (req, res) => {
     if (!validAddressParam(addr)) {
       return res.status(400).json({ ok: false, error: 'Invalid address format' });
     }
+    if (!(await canAccessAddress(req, addr))) {
+      return res.status(404).json({ ok: false, error: 'Not found' });
+    }
     const email = await getEmail(addr, req.params.id);
     if (!email) return res.status(404).json({ ok: false, error: 'Not found' });
     // `links` keeps arrival order; `bestLinks` is the same set ranked so the
@@ -1128,6 +1639,9 @@ app.get('/api/verify-link/:address', auth, async (req, res) => {
     const addr = decodeURIComponent(req.params.address).toLowerCase();
     if (!validAddressParam(addr)) {
       return res.status(400).json({ ok: false, error: 'Invalid address format' });
+    }
+    if (!(await canAccessAddress(req, addr))) {
+      return res.status(404).json({ ok: false, error: 'Not found' });
     }
     const fromFilter = String(req.query.from || '').toLowerCase();
     const { emails } = await listEmails(addr, { perPage: 50, since: req.query.since }); // newest first
@@ -1147,6 +1661,9 @@ async function longPoll(req, res, pick, timeoutError) {
     const addr = decodeURIComponent(req.params.address).toLowerCase();
     if (!validAddressParam(addr)) {
       return res.status(400).json({ ok: false, error: 'Invalid address format' });
+    }
+    if (!(await canAccessAddress(req, addr))) {
+      return res.status(404).json({ ok: false, error: 'Not found' });
     }
     const fromFilter = String(req.query.from || '').toLowerCase();
     const since = req.query.since;
@@ -1186,6 +1703,9 @@ app.get('/api/code/:address', auth, async (req, res) => {
     if (!validAddressParam(addr)) {
       return res.status(400).json({ ok: false, error: 'Invalid address format' });
     }
+    if (!(await canAccessAddress(req, addr))) {
+      return res.status(404).json({ ok: false, error: 'Not found' });
+    }
     const { emails } = await listEmails(addr, { perPage: 50, since: req.query.since });
     const found = findCode(emails, String(req.query.from || '').toLowerCase());
     if (found) return res.json({ ok: true, ...found });
@@ -1219,6 +1739,9 @@ app.delete('/api/inbox/:address', auth, async (req, res) => {
     if (!validAddressParam(addr)) {
       return res.status(400).json({ ok: false, error: 'Invalid address format' });
     }
+    if (!(await canAccessAddress(req, addr))) {
+      return res.status(404).json({ ok: false, error: 'Not found' });
+    }
     await clearInbox(addr);
     res.json({ ok: true });
   } catch (err) {
@@ -1226,9 +1749,17 @@ app.delete('/api/inbox/:address', auth, async (req, res) => {
   }
 });
 
-// Dead-letter log: emails that exhausted the store retry budget.
-app.get('/api/dead-letters', auth, (req, res) => {
-  res.json({ ok: true, count: deadLetters.length, deadLetters: deadLetters.slice(-50) });
+// Dead-letter log: emails that exhausted the store retry budget. An account
+// key only ever sees entries for addresses it owns.
+app.get('/api/dead-letters', auth, async (req, res) => {
+  let list = deadLetters;
+  if (req.auth.role !== 'master') {
+    list = [];
+    for (const d of deadLetters) {
+      if (await canAccessAddress(req, d.address)) list.push(d);
+    }
+  }
+  res.json({ ok: true, count: list.length, deadLetters: list.slice(-50) });
 });
 
 // --- Local-only dashboard: browse addresses and inboxes in a browser ---
@@ -1341,4 +1872,12 @@ module.exports = {
   getSendTransport,
   setSendTransport,
   registerAddress,
+  ownershipFor,
+  canAccessAddress,
+  newApiKey,
+  hashApiKey,
+  newAccountRow,
+  createAccount,
+  findAccountByKeyHash,
+  dkimPublicKeyRecord,
 };

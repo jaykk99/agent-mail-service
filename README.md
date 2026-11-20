@@ -1,9 +1,12 @@
 # Agent Mail Service
 
-Self-hosted email for AI agents. Receives provider verification/signup emails
-via SMTP and exposes them through a simple REST API, so the Error Inbox MCP
-can poll for verification codes and links without depending on Gmail or
-temp-mail services.
+A free, self-hosted mail domain for AI agents. Each agent signs up by itself,
+gets its own API key and its own addresses on your domain, receives real
+internet mail over SMTP (provider signups, verification codes, magic links)
+and reads it back through a small REST API — no Gmail, no temp-mail, no
+per-seat cost. One deployment serves thousands of agents: inboxes are
+namespaced per account, API keys are stored hashed, and outbound mail is
+DKIM-signed so it is deliverable.
 
 ## Architecture
 
@@ -22,9 +25,15 @@ temp-mail services.
     cap) lists inboxes, fetches full emails, polls or long-polls for
     verification links, and clears inboxes. Requests are logged as
     structured JSON lines with a per-request id.
-  - **Storage**: Supabase table `agent_emails` when `SUPABASE_URL` and
-    `SUPABASE_SERVICE_KEY` are set, otherwise an in-memory Map (local dev
-    only — data is lost on restart). See `supabase-migration.sql`.
+  - **Accounts (multi-tenant)**: `POST /api/accounts` mints a free account
+    and exactly one API key (only its SHA-256 hash is stored). An account key
+    sees only the addresses that account created and can only send `From`
+    them; the master token sees everything. This is what lets one deployment
+    serve thousands of independent agents.
+  - **Storage**: Supabase tables `agent_emails` (mail), `agent_accounts` and
+    `agent_addresses` (accounts + address ownership) when `SUPABASE_URL` and
+    `SUPABASE_SERVICE_KEY` are set, otherwise in-memory Maps (local dev only —
+    data is lost on restart). See `supabase-migration.sql`.
 - **`render.yaml`** — declarative Render web service config (the Railway
   trial expired; production deploys from here).
 - **`supabase-migration.sql`** — one-time, idempotent SQL for the
@@ -44,13 +53,21 @@ still the default. Set `AGENT_MAIL_TOKEN` to a long random token.
 
 ## API
 
-All endpoints except `GET /health` and `GET /dashboard` require
-`Authorization: Bearer <AGENT_MAIL_TOKEN>`. Address path parameters are
-validated (`local@domain` shape, max 254 chars); malformed ones get a 400.
+`GET /health`, `GET /dashboard`, `GET /api/dns` and `POST /api/accounts`
+(free signup) are open. Everything else requires a Bearer credential: either
+the master token `AGENT_MAIL_TOKEN`, or an account API key from
+`POST /api/accounts`. The master key is admin (every address, every account);
+an account key is scoped to the addresses that account created. Address path
+parameters are validated (`local@domain` shape, max 254 chars); malformed
+ones get a 400, and another account's address answers 404.
 
 | Method | Endpoint | Purpose |
 |---|---|---|
 | GET | `/health` | `{ ok, domain, storage, addresses, relay, webhook, addressTtlHours, retentionDays, deadLetters, retryQueue }` (no auth) |
+| POST | `/api/accounts` | free signup: `{ name? }` -> `{ account, apiKey }` (key shown once) |
+| GET | `/api/me` | caller identity + usage (account key, or master summary) |
+| GET | `/api/accounts` | every account with usage counts (master only) |
+| GET | `/api/dns` | MX/SPF/DKIM/DMARC records to publish (no auth) |
 | POST | `/api/inbound` | Worker delivery only: `{ to, from, subject, text, html, messageId?, date? }` -> `{ ok, stored, id?, duplicate? }` (Bearer inbound secret) |
 | POST | `/api/addresses` | `{ prefix }` -> `{ address }` (rate limited, prefix max 64 chars) |
 | GET | `/api/addresses` | known addresses with inbox counts + created/last-seen |
@@ -85,9 +102,10 @@ validated (`local@domain` shape, max 254 chars); malformed ones get a 400.
   of on the next 2-second poll.
 - **Duplicates**: a delivery retried with the same `messageId` (HTTP
   inbound) or `Message-ID` header (SMTP) is acknowledged and stored once.
-- **Addresses survive restarts**: with Supabase, `GET /api/addresses` and
-  `/health` are rebuilt from stored mail, so the list is not empty after a
-  free Render instance sleeps and wakes.
+- **Addresses survive restarts**: with Supabase, accounts and address
+  ownership are stored in `agent_accounts`/`agent_addresses`, so an agent
+  keeps its inbox, its quota usage and its ability to send after a restart
+  (or after a free Render instance sleeps and wakes).
 
 ### Inbox pagination + search
 
@@ -106,6 +124,55 @@ codes, linkCount, preview, attachments, attachmentCount }`, where the last two a
 (number) kept under both names for compatibility. Full attachment metadata
 (filename, content type, size) is on the single-email endpoint; attachment
 *content* is never stored or exposed.
+
+## Accounts: one free, isolated inbox per agent
+
+Signing up costs one HTTP call and needs no email address:
+
+```sh
+curl -s -X POST https://your-domain/api/accounts \
+  -H 'content-type: application/json' -d '{"name":"my-agent"}'
+# -> { "ok": true, "apiKey": "am_...", "account": { "id": "acct_...", ... } }
+```
+
+The API key is shown **once** and only its SHA-256 hash is stored. Use it
+where the master token used to go — the same endpoints now return only that
+agent's world:
+
+```sh
+KEY=am_...
+curl -s -X POST https://your-domain/api/addresses \
+  -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"prefix":"signup-42"}'        # -> signup-42@your-domain
+curl -s "https://your-domain/api/code/signup-42@your-domain/wait?timeoutMs=60000" \
+  -H "authorization: Bearer $KEY"
+```
+
+What an account key can and cannot do:
+
+- It sees **only** the addresses it created. `GET /api/addresses`,
+  `/api/inbox/...`, `/api/code`, `/api/verify-link`, `/api/wait`,
+  `DELETE /api/inbox/...` and `/api/dead-letters` are all scoped to it, and
+  another account's address answers **404** so keys cannot enumerate.
+- It can only send `From` an address it owns (403 otherwise).
+- Creating an address another account owns answers 409; a prefix is claimed
+  once.
+- `POST /api/accounts` is open by default (this is a free service).
+  `SIGNUP_OPEN=0` makes signup master-token-only; `SIGNUP_PER_IP_PER_HOUR`
+  and `SIGNUP_MAX_PER_HOUR` bound abuse, and `ADDRESS_QUOTA_PER_ACCOUNT`
+  (default 25) caps how many addresses one agent holds.
+- Address creation is rate-limited **per account** with
+  `ADDRESS_CREATE_MAX_PER_HOUR`, so one agent's traffic never throttles the
+  rest of the fleet.
+
+`AGENT_MAIL_TOKEN` remains the admin key: it sees every address, creates
+unlimited addresses, sends from any address, and is the only key that can
+list accounts (`GET /api/accounts`). Addresses it creates are owned by
+`master` and stay invisible to accounts.
+
+With Supabase configured, accounts and ownership live in `agent_accounts`
+and `agent_addresses`, so a restart keeps every agent's inbox and its ability
+to send. Without it everything is in memory and lost on restart.
 
 ## Reliability
 
@@ -169,6 +236,13 @@ codes, linkCount, preview, attachments, attachmentCount }`, where the last two a
 | `INCOMING_WEBHOOK_TIMEOUT_MS` | no | webhook delivery timeout, default 8000 |
 | `SMTP_RELAY_HOST` / `SMTP_RELAY_PORT` / `SMTP_RELAY_USER` / `SMTP_RELAY_PASS` | no | outbound relay for POST /api/send (unset = sends answer 503) |
 | `SEND_MAX_PER_HOUR` | no | outbound sends per From address per rolling hour (default 100) |
+| `SIGNUP_OPEN` | no | `1` (default) allows free `POST /api/accounts`; `0` = master-token only |
+| `SIGNUP_PER_IP_PER_HOUR` / `SIGNUP_MAX_PER_HOUR` | no | signup abuse caps (default 5 per IP, 500 global) |
+| `ADDRESS_QUOTA_PER_ACCOUNT` | no | addresses one account may own (default 25; master unlimited) |
+| `DKIM_DOMAIN` / `DKIM_SELECTOR` | no | signing domain (default `MAIL_DOMAIN`) and selector (default `mail`) |
+| `DKIM_PRIVATE_KEY` | no | PEM RSA key; unset = outbound mail is not signed |
+| `DMARC_POLICY` | no | DMARC policy advertised by `/api/dns` (default `none`) |
+| `MX_HOST` | no | host the MX record should point at (default `MAIL_DOMAIN`) |
 
 ## Free self-hosted deployment (no Cloudflare, nothing paid)
 
@@ -195,6 +269,37 @@ machine with a public IP that accepts inbound port 25, plus a free domain.
 4. **Test**: check the service health endpoint, create an
    address via `POST /api/addresses`, send it a mail from any account, then
    `GET /api/verify-link/<address>/wait`.
+
+### DNS, DKIM and deliverability
+
+`GET /api/dns` prints the exact records to publish for `MAIL_DOMAIN`,
+including the DKIM record derived from `DKIM_PRIVATE_KEY` — so the signing
+key and the DNS record can never drift apart:
+
+```sh
+curl -s https://your-domain/api/dns
+```
+
+| Type | Name | Value | Why |
+|---|---|---|---|
+| MX | your domain | `10 <MX_HOST>` | internet mail arrives at this host |
+| A | `<MX_HOST>` | your host's public IP | the MX target must resolve |
+| TXT | your domain | `v=spf1 a mx ~all` | only this host may send as the domain |
+| TXT | `mail._domainkey.<DKIM_DOMAIN>` | `v=DKIM1; k=rsa; p=<public key>` | verifies outbound DKIM signatures |
+| TXT | `_dmarc.<domain>` | `v=DMARC1; p=none; rua=mailto:dmarc@<domain>` | DMARC policy + reports |
+
+Generate the signing key once and keep it out of git:
+
+```sh
+openssl genrsa -out dkim.pem 2048
+# then set DKIM_PRIVATE_KEY in .env (literal newlines, or \n escapes)
+```
+
+On a free subdomain (DuckDNS and similar) you control the DNS, so all of the
+above is still $0. Leave `DMARC_POLICY=none` until `/api/dns` reports
+`dkim: configured` and a test message shows `dkim=pass`, then raise it to
+`quarantine`. Outbound mail is handed to the relay (`SMTP_RELAY_*`) already
+signed, so relays and receivers can authenticate it.
 
 Notes:
 - The SMTP listener only accepts recipients `@MAIL_DOMAIN` (550 otherwise),
