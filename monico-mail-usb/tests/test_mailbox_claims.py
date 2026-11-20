@@ -72,6 +72,37 @@ class AgentSelectedMailboxTests(unittest.TestCase):
             service.issue_invites()
         self.assertEqual(service.slots()["unreserved_slots"], 0)
 
+    def test_reserved_system_addresses_do_not_take_agent_invitations(self):
+        self.registry.provision_system_mailbox("postmaster")
+        self.registry.provision_system_mailbox("abuse")
+        service = MailboxClaims(self.registry, capacity=2)
+        self.assertEqual(service.slots()["registered"], 0)
+        a, b = service.issue_invites(count=2)["codes"]
+        self.assertEqual(service.claim(a, "research")["email"],
+                         "research@mail.example.invalid")
+        self.assertEqual(service.claim(b, "support")["email"],
+                         "support@mail.example.invalid")
+        self.assertEqual(service.slots()["registered"], 2)
+        self.assertEqual(service.slots()["unreserved_slots"], 0)
+        self.assertEqual(self.registry.total_mailbox_count(), 4)
+        with self.assertRaises(ValueError):
+            service.issue_invites()
+
+    def test_invitation_quota_respects_registry_configuration(self):
+        import os
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as location, patch.dict(
+            os.environ, {"MONICO_MAX_MAILBOXES": "2"}
+        ):
+            small_registry = Registry(location, "mail.example.invalid")
+            service = MailboxClaims(small_registry)
+            self.assertEqual(service.capacity, 2)
+            service.issue_invites(count=2)
+            with self.assertRaises(ValueError):
+                service.issue_invites()
+            with self.assertRaises(ValueError):
+                MailboxClaims(small_registry, capacity=1000)
+
     def test_restart_retains_claim_and_prevents_replay(self):
         code = self.claims.issue_invites()["codes"][0]
         account = self.claims.claim(code, "my.custom_name")
