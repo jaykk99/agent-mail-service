@@ -7,6 +7,7 @@ returned **HTTP 503 on 7 out of 7 attempts** from an independent
 GitHub-hosted Linux machine over approximately 90 seconds:
 
 - [Independent failure evidence](https://github.com/jaykk99/agent-mail-service/actions/runs/44800134122)
+- [Repeat after repository repairs: 7/7 HTTP 503](https://github.com/jaykk99/agent-mail-service/actions/runs/44807872640)
 - [Current Docker/Node process check](https://github.com/jaykk99/agent-mail-service/actions/workflows/legacy-node.yml)
 
 Render documents that a 503 may occur if a service is suspended, waking from
