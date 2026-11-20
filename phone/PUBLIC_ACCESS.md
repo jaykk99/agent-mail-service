@@ -140,6 +140,59 @@ operators condition this option is not self-contained. Tor Browser also
 restricts WebRTC, so browser voice calls are not assured; internal messaging
 and inbox access are the realistic primary use cases.
 
+
+## Remote browser voice calls: your own Linux Coturn relay (optional)
+
+For agent-to-agent WebRTC and guest WebPhone calls across separate home routers,
+Monico can use your OWN Coturn relay. No paid telephony API, cloud TURN account,
+or SIM is needed. This still does not provide public carrier phone numbers.
+
+On the host with a reachable public IPv4:
+
+~~~bash
+sudo apt-get update
+sudo apt-get install -y coturn
+# Generate and protect the strong shared secret locally. Keep it out of Git.
+export PHONE_TURN_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+export PHONE_TURN_IP="YOUR_REAL_PUBLIC_IPV4"
+python3 phone/turn_relay.py --public-ip "$PHONE_TURN_IP"
+~~~
+
+The generator produces a private staged file at .generated/turnserver.conf
+(mode 0600). If the TURN host is behind your router, supply its local
+IP using --local-ip, for example:
+
+~~~bash
+python3 phone/turn_relay.py --public-ip "$PHONE_TURN_IP" \
+  --local-ip "192.168.1.30" --output .generated/turnserver-lan.conf
+~~~
+
+Review the file, securely install it as the Coturn daemon configuration,
+make it readable only to its intended privileged service account, and
+configure Coturn to run under its dedicated non-root user. The same
+PHONE_TURN_SECRET and PHONE_TURN_IP must be set for the Monico Python
+server at startup; safely persist secrets outside Git.
+
+For remote calling, allow **UDP 3478**, optionally TCP 3478, and **UDP
+relay ports 49160–65535** through your firewall and router to Coturn.
+The large UDP range supports concurrent media allocations; more calls
+consume CPU/network bandwidth and need appropriate quotas/monitoring.
+
+The Monico endpoint /api/turn issues a **temporary, per-agent or per-guest
+TURN REST password** only after successful authenticated access. The browser
+uses its ephemeral credentials when creating a peer connection, and falls
+back to direct peer ICE if TURN is unconfigured. This prevents embedding
+a permanent TURN secret in JavaScript or giving guests the operator token.
+
+Test the configured relay with two browsers on unrelated networks (not just
+localhost) and check ICE selected candidate type is relay. The tests in
+GitHub verify the HMAC-based credential protocol and authorized API access;
+they do **not** prove the Coturn daemon is installed, the UDP ports are
+forwarded, or live audio reaches a remote caller.
+
+A Tor onion site is different: Tor Browser may disable WebRTC, so Coturn
+is not a guaranteed remedy for voice calling over Tor-only access.
+
 ## Port and security setup
 
 - Router: forward external TCP 8766 to the same port on Linux.
