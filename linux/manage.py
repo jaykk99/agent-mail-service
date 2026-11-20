@@ -270,7 +270,15 @@ def do_status(state):
     accounts = None
     if cfg is not None:
         accounts = Registry(folder, cfg["domain"]).mailbox_count()
+    from linux import public_manage
+    try:
+        public = public_manage.status(state)
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        public = {"prepared": False, "local_https_running": False,
+                  "outside_network_verified": False,
+                  "error": f"Public gateway metadata error: {type(exc).__name__}"}
     return {
+        "public_browser_gateway": public,
         "phone_online_local": phone,
         "mcp_online_local": mcp,
         "mcp_url": "http://127.0.0.1:8787/mcp" if mcp else None,
@@ -294,6 +302,10 @@ def main():
     parser.add_argument("--state-dir", help="Explicit private phone/MCP data directory")
     parser.add_argument("--count", type=int, default=1, help="Invite count (1-200)")
     parser.add_argument("--name", help="Chosen email local part for 'claim'")
+    parser.add_argument("--public-ip", help="Your own reachable IPv4 for optional HTTPS gateway")
+    parser.add_argument("--public-port", type=int, default=8766)
+    parser.add_argument("--allow-public", action="store_true",
+                        help="Explicitly allow an HTTPS listener on all interfaces")
     args = parser.parse_args()
     try:
         state = choose_storage(state_dir=args.state_dir).path
@@ -309,7 +321,15 @@ def main():
                 raise RuntimeError("FastMCP not installed. Run: bash start.sh --full up --install")
             phone_result = run_phone(state)
             mcp_result = start_mcp(config, folder)
+            public_result = None
+            if args.public_ip is not None or args.allow_public:
+                if not args.public_ip or not args.allow_public:
+                    raise ValueError("Public gateway requires BOTH --public-ip and --allow-public")
+                from linux import public_manage
+                public_manage.prepare(state, args.public_ip, args.public_port)
+                public_result = public_manage.start(state, allow_public=True)
             print(json.dumps({
+                "public_browser_gateway": public_result or do_status(state)["public_browser_gateway"],
                 "phone": phone_result, "mail_mcp": mcp_result,
                 "dashboard": LOCAL_PHONE, "mcp": "http://127.0.0.1:8787/mcp",
                 "storage": str(state), "mail_domain": config["domain"],
@@ -333,6 +353,8 @@ def main():
             print(json.dumps(result, indent=2))
             return
         if args.action == "stop":
+            from linux import public_manage
+            print("Public browser gateway:", public_manage.stop(state))
             cfg, folder = load_config(state)
             if cfg:
                 print("Mail MCP:", stop_mcp(folder))
