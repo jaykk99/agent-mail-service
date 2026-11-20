@@ -3,14 +3,21 @@ services:
     name: agent-mail-service
     runtime: node
     plan: free
-    buildCommand: npm install
+    buildCommand: npm ci --omit=dev
     startCommand: node server.js
     healthCheckPath: /health
     envVars:
-      - key: PORT
-        sync: false # Render injects PORT automatically
+      # Render sets PORT automatically. Do not create an empty PORT variable.
+      # Render exposes HTTP only. This legacy API accepts inbound mail via
+      # an authenticated HTTPS worker, NOT a direct public SMTP port.
+      - key: NODE_ENV
+        value: production
+      - key: SMTP_ENABLED
+        value: "0"
       - key: SMTP_PORT
         value: "2525"
+      - key: SMTP_HOST
+        value: "127.0.0.1"
       - key: AGENT_MAIL_TOKEN
         sync: false # set a long random token in the Render dashboard
       - key: AGENT_MAIL_INBOUND_SECRET
