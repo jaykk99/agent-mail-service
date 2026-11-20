@@ -295,11 +295,14 @@ def do_status(state):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", nargs="?", default="up",
-                        choices=("up", "status", "doctor", "stop", "install", "invites", "claim"))
+                        choices=("up", "status", "doctor", "release", "stop", "install", "invites", "claim"))
     parser.add_argument("--install", action="store_true",
                         help="On 'up', create venv and install FastMCP from PyPI")
     parser.add_argument("--domain", help="Initial domain (default mail.example.invalid for local tests)")
     parser.add_argument("--state-dir", help="Explicit private phone/MCP data directory")
+    parser.add_argument("--scope", default="local",
+                        choices=("local", "public-web", "internet-mail", "carrier-phone", "all"),
+                        help="Release gate scope for 'release' action")
     parser.add_argument("--count", type=int, default=1, help="Invite count (1-200)")
     parser.add_argument("--name", help="Chosen email local part for 'claim'")
     parser.add_argument("--public-ip", help="Your own reachable IPv4 for optional HTTPS gateway")
@@ -351,6 +354,16 @@ def main():
             result["postfix_dovecot_verified"] = False
             result["external_browser_reachability_verified"] = False
             print(json.dumps(result, indent=2))
+            return
+        if args.action == "release":
+            script = ROOT / "linux" / "release_gate.py"
+            result = subprocess.run(
+                [sys.executable, str(script), "--state-dir", str(state), "--scope", args.scope],
+                capture_output=True, text=True, cwd=str(ROOT), timeout=35)
+            print(result.stdout, end="")
+            if result.returncode:
+                parser.exit(result.returncode, result.stderr or
+                            "Release gate BLOCKED: see failed checks above.\n")
             return
         if args.action == "stop":
             import public_manage
