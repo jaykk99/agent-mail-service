@@ -13,6 +13,8 @@ class MCPHttpsTests(unittest.TestCase):
                                 "/etc/ssl/myhost/privkey.pem")
         self.assertIn("server_name mcp.my-real-mail.org", conf)
         self.assertIn("listen 443 ssl;", conf)
+        self.assertIn("listen [::]:443 ssl;", conf)
+        self.assertIn("listen [::]:80;", conf)
         self.assertIn("ssl_protocols TLSv1.2 TLSv1.3", conf)
         self.assertIn("proxy_pass http://127.0.0.1:8787;", conf)
         self.assertIn("proxy_set_header Authorization $http_authorization;", conf)
