@@ -18,8 +18,8 @@ class PublicIPv6Tests(unittest.TestCase):
     def test_ipv6_only_zone_uses_aaaa_not_invented_ipv4(self):
         zone = zone_text("public-monico.org", None, None, None,
                          mail_ipv6=V6_MAIL, ns1_ipv6=V6_NS1, ns2_ipv6=V6_NS2)
-        self.assertIn("mail    IN AAAA  " + V6_MAIL, zone)
-        self.assertIn("ns1     IN AAAA  " + V6_NS1, zone)
+        self.assertIn("mail   IN AAAA  " + V6_MAIL, zone)
+        self.assertIn("ns1    IN AAAA  " + V6_NS1, zone)
         self.assertNotIn(" IN A  ", zone)
         self.assertIn("MX 10 mail.public-monico.org", zone)
 
