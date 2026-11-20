@@ -3,9 +3,9 @@ import hmac
 import os
 from pathlib import Path
 from fastmcp import FastMCP
-from fastmcp.server.auth import StaticTokenVerifier
 from monico_core import Registry
 from mailbox_claims import MailboxClaims
+from monico_auth import MonicoTokenVerifier, require_operator, require_agent, require_invitation
 from selfhost.mail_client import SelfHostedMail
 
 ADMIN_KEY = os.environ.get("MONICO_ADMIN_KEY")
@@ -21,14 +21,13 @@ self_hosted_mail = SelfHostedMail(registry, os.environ["MONICO_MAIL_HOST"]) if o
 MCP_BEARER_TOKEN = os.environ.get("MONICO_MCP_BEARER_TOKEN")
 if not MCP_BEARER_TOKEN or len(MCP_BEARER_TOKEN) < 32:
     raise RuntimeError("Set MONICO_MCP_BEARER_TOKEN to a random secret of at least 32 characters")
-auth = StaticTokenVerifier(tokens={
-    MCP_BEARER_TOKEN: {"sub": "monico-operator", "client_id": "monico-operator"}
-})
+auth = MonicoTokenVerifier(registry, MCP_BEARER_TOKEN)
 mcp = FastMCP("Monico Mail", auth=auth)
 
 @mcp.tool()
 def register_agent(admin_key: str, agent_id: str, desired_name: str) -> dict:
     """Admin-only: provision or retrieve an agent identity. Token returned once."""
+    require_operator()
     if not hmac.compare_digest(admin_key, ADMIN_KEY):
         raise ValueError("Unauthorized")
     return registry.register(agent_id, desired_name)
@@ -36,6 +35,7 @@ def register_agent(admin_key: str, agent_id: str, desired_name: str) -> dict:
 @mcp.tool()
 def create_invites(admin_key: str, count: int = 1, valid_days: int = 7) -> dict:
     """Admin-only: generate single-use invites. Agents choose their own email names."""
+    require_operator()
     if not hmac.compare_digest(admin_key, ADMIN_KEY):
         raise ValueError("Unauthorized")
     return claims.issue_invites(count, valid_days)
@@ -48,11 +48,13 @@ def check_email_name(desired_name: str) -> dict:
 @mcp.tool()
 def claim_my_email(invitation_code: str, desired_name: str) -> dict:
     """Choose your own unique email name using a one-time invitation."""
+    require_invitation(invitation_code)
     return claims.claim(invitation_code, desired_name)
 
 @mcp.tool()
 def get_domain_info(admin_key: str) -> dict:
     """Admin-only: current domain, used mailboxes, pending invitations and capacity."""
+    require_operator()
     if not hmac.compare_digest(admin_key, ADMIN_KEY):
         raise ValueError("Unauthorized")
     return claims.slots()
@@ -60,16 +62,19 @@ def get_domain_info(admin_key: str) -> dict:
 @mcp.tool()
 def get_my_email(agent_id: str, agent_token: str) -> str:
     """Look up the permanent email assignment."""
+    require_agent(agent_id, agent_token)
     return registry.get_email(agent_id, agent_token)
 
 @mcp.tool()
 def rotate_agent_key(agent_id: str, agent_token: str) -> dict:
     """Rotate an agent credential, invalidating its previous key."""
+    require_agent(agent_id, agent_token)
     return {"agent_token": registry.rotate(agent_id, agent_token)}
 
 @mcp.tool()
 def get_mail_status(agent_id: str, agent_token: str) -> dict:
     """Report current capability honestly."""
+    require_agent(agent_id, agent_token)
     local_email = registry.get_email(agent_id, agent_token)
     return {"email": local_email, "mailbox_credentials_issued": True,
             "self_hosted_imap_smtp_configured": self_hosted_mail is not None,
@@ -78,26 +83,31 @@ def get_mail_status(agent_id: str, agent_token: str) -> dict:
 @mcp.tool()
 def send_internal_mail(agent_id: str, agent_token: str, recipient: str, subject: str, body: str) -> dict:
     """Send a message to another registered Monico agent; no internet delivery."""
+    require_agent(agent_id, agent_token)
     return registry.send_internal(agent_id, agent_token, recipient, subject, body)
 
 @mcp.tool()
 def list_inbox(agent_id: str, agent_token: str, limit: int = 20) -> list:
     """List this agent's received local messages."""
+    require_agent(agent_id, agent_token)
     return registry.inbox(agent_id, agent_token, limit)
 
 @mcp.tool()
 def read_mail(agent_id: str, agent_token: str, message_id: int) -> dict:
     """Read a message addressed to this authenticated agent."""
+    require_agent(agent_id, agent_token)
     return registry.read_message(agent_id, agent_token, message_id)
 
 @mcp.tool()
 def rotate_mail_password(agent_id: str, agent_token: str) -> dict:
     """Issue a new independent IMAP/SMTP mailbox password, invalidating the old one."""
+    require_agent(agent_id, agent_token)
     return registry.rotate_mail_password(agent_id, agent_token)
 
 @mcp.tool()
 def count_mailboxes(admin_key: str) -> int:
     """Admin-only registry count (supports 1,000+ independent entries)."""
+    require_operator()
     if not hmac.compare_digest(admin_key, ADMIN_KEY):
         raise ValueError("Unauthorized")
     return registry.mailbox_count()
@@ -106,6 +116,7 @@ def count_mailboxes(admin_key: str) -> int:
 def send_real_email(agent_id: str, agent_token: str, mail_password: str,
                     recipient: str, subject: str, body: str) -> dict:
     """Submit genuine SMTP mail using THIS agent's own self-hosted mailbox."""
+    require_agent(agent_id, agent_token)
     if self_hosted_mail is None:
         raise ValueError("Set MONICO_MAIL_HOST after your own Postfix/Dovecot are configured")
     return self_hosted_mail.send(agent_id, agent_token, mail_password, recipient, subject, body)
@@ -114,6 +125,7 @@ def send_real_email(agent_id: str, agent_token: str, mail_password: str,
 def list_real_inbox(agent_id: str, agent_token: str, mail_password: str,
                     limit: int = 20) -> list:
     """Read message headers from THIS agent's real Dovecot IMAP inbox."""
+    require_agent(agent_id, agent_token)
     if self_hosted_mail is None:
         raise ValueError("Self-hosted mail server is not configured")
     return self_hosted_mail.inbox(agent_id, agent_token, mail_password, limit)
@@ -122,6 +134,7 @@ def list_real_inbox(agent_id: str, agent_token: str, mail_password: str,
 def read_real_email(agent_id: str, agent_token: str, mail_password: str,
                     imap_uid: str) -> dict:
     """Read plain-text content from THIS agent's actual IMAP inbox."""
+    require_agent(agent_id, agent_token)
     if self_hosted_mail is None:
         raise ValueError("Self-hosted mail server is not configured")
     return self_hosted_mail.read(agent_id, agent_token, mail_password, imap_uid)
@@ -129,6 +142,7 @@ def read_real_email(agent_id: str, agent_token: str, mail_password: str,
 @mcp.tool()
 def list_real_sent(agent_id: str, agent_token: str, limit: int = 20) -> list:
     """List recent SMTP submissions tracked locally for this agent."""
+    require_agent(agent_id, agent_token)
     if self_hosted_mail is None:
         raise ValueError("Self-hosted mail server is not configured")
     return self_hosted_mail.sent(agent_id, agent_token, limit)
