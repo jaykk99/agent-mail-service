@@ -1,0 +1,74 @@
+name: Monico independent public network probe
+on:
+  workflow_dispatch:
+    inputs:
+      public_ipv4:
+        description: "Public IPv4 you CONTROL and have already forwarded to your Linux Monico host"
+        required: true
+        type: string
+      port:
+        description: "Public Monico HTTPS port"
+        required: true
+        type: string
+        default: "8766"
+      public_ca_pem_base64:
+        description: "Base64 of Monico PUBLIC monico-ca.crt only (never its private key)"
+        required: true
+        type: string
+      mail_domain:
+        description: "Optional REAL domain delegated to you for independent SMTP/MX checks"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  external-network:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+      - name: Decode public CA and validate target without exposing agent credentials
+        env:
+          TARGET_IP: ${{ inputs.public_ipv4 }}
+          TARGET_PORT: ${{ inputs.port }}
+          MONICO_CA_B64: ${{ inputs.public_ca_pem_base64 }}
+        run: |
+          python3 - <<'PY'
+          import base64, os
+          from pathlib import Path
+          from phone.probe_public import validate_public_url
+          ip = os.environ['TARGET_IP']
+          port = int(os.environ['TARGET_PORT'])
+          target = validate_public_url(f'https://{ip}:{port}')
+          raw = base64.b64decode(os.environ['MONICO_CA_B64'], validate=True)
+          if len(raw) > 16384 or b'-----BEGIN CERTIFICATE-----' not in raw:
+              raise ValueError('Only a PUBLIC PEM CA certificate is accepted')
+          p = Path(os.environ['RUNNER_TEMP']) / 'monico-public-ca.crt'
+          p.write_bytes(raw)
+          p.chmod(0o600)
+          print('Checked globally routable IP, TLS port, and public CA certificate format.')
+          print('The HTTPS test will run from GitHub-hosted Linux outside your LAN.')
+          PY
+      - name: Verify REAL outside-network HTTPS and anonymous API rejection
+        env:
+          TARGET_IP: ${{ inputs.public_ipv4 }}
+          TARGET_PORT: ${{ inputs.port }}
+        run: |
+          python3 phone/probe_public.py \
+            --url "https://$TARGET_IP:$TARGET_PORT" \
+            --ca-cert "$RUNNER_TEMP/monico-public-ca.crt"
+      - name: Verify independent DNS and public SMTP reachability (optional)
+        if: ${{ inputs.mail_domain != '' }}
+        env:
+          MAIL_DOMAIN: ${{ inputs.mail_domain }}
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y dnsutils
+          python3 monico-mail-usb/selfhost/public_probe.py --domain "$MAIL_DOMAIN"
+      - name: State exact scope of success
+        if: success()
+        run: |
+          echo 'PASS: browser HTTPS reachability from a separate external Linux network.'
+          echo 'This run does not verify cross-NAT voice audio, real email delivery, public DIDs, or carrier SMS.'
