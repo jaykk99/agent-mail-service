@@ -52,8 +52,15 @@ npm run check
 npm start    # API on PORT (3000), SMTP on SMTP_PORT (2525)
 ```
 
-Default token is `dev-token-change-me` — the server warns at boot if it is
-still the default. Set `AGENT_MAIL_TOKEN` to a long random token.
+**Security:** `AGENT_MAIL_TOKEN` must be set to a unique, unguessable secret.
+An unset token or either public example value (`dev-token-change-me` or
+`generate-a-long-random-token-here`) now **disables master and fallback
+inbound authentication**, rather than leaving an openly guessable admin
+credential active. The server warns without printing any secret.
+Configure a real master token before exposing the service publicly; if
+`AGENT_MAIL_INBOUND_SECRET` is also unset, Cloudflare inbound delivery
+will return 401 until one of these credentials is configured. For local
+testing, export a temporary random token before `npm start`.
 
 ## API
 
