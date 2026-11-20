@@ -2,53 +2,43 @@
 
 **Goal:** Up to 1,000+ independent, **agent-named** email addresses, chosen by each agent, with separate IMAP/SMTP credentials, mailbox identities in SQLite and future real mail delivery through **your own** Postfix/Dovecot Linux mail server. **No Gmail, Outlook or third-party mailbox provider is used.**
 
-## Choose your own domain and email name (new)
+## Quick setup: wire in your domain and the agents' chosen names
 
-**You choose the domain; agents choose their own names.** Examples (illustrative only):
-
-- One agent claims `sales@yourdomain.com`
-- Another claims `research@yourdomain.com`
-- Another claims `myshop@yourdomain.com`
-
-The internal `agent_id` is generated separately and is **not** used as the email name.
-
-**Important domain limit:** Monico cannot make `yourdomain.com` a real public domain unless it has been delegated to you by the global DNS hierarchy. You can run all your own DNS/mail software without Gmail or a paid email host, but domain delegation itself cannot be bypassed. Do not type a domain you do not control and expect public email to work.
-
-### Configure a domain locally on Linux
-
-From `agent-mail-service/monico-mail-usb`, after sharing the USB drive with Linux:
+Run these on your Chromebook's Linux Terminal, after sharing your USB drive with Linux:
 
 ```bash
-export MONICO_DATA="/mnt/chromeos/removable/YOUR_USB/monico"
-mkdir -p "$MONICO_DATA"
-python3 selfhost/configure_domain.py --domain your-actually-delegated-domain.tld --data "$MONICO_DATA"
-source "$HOME/.config/monico-mail/domain.env"
-echo "$MONICO_DOMAIN"
+cd ~/agent-mail-service
+git pull
+cd monico-mail-usb
+
+# See the exact name of your USB drive
+ls /mnt/chromeos/removable/
+
+# Replace the sample with YOUR delegated domain and USB drive name
+python3 setup_monico.py --usb "YOUR_USB_DRIVE" --domain "your-owned-domain.org"
+
+# Domain and USB now load automatically; no manual export needed
+python3 mailbox_admin.py status
+
+# Issue private one-use invitations; up to 200 per batch
+python3 mailbox_admin.py issue-invites --count 10
 ```
 
-Replace the sample with **your actual delegated domain or subdomain**. The configurator saves `MONICO_DOMAIN` privately, checks for an existing database using a different domain, and does *not* register DNS. The startup script loads this saved domain automatically when `MONICO_DOMAIN` is not already exported. If you previously created test accounts at `mail.example.invalid`, use a new empty USB data directory for the real domain (or migrate existing accounts explicitly); Monico prevents silent address changes.
-
-### Give agents their own choice of email name
-
-Create one-time signup invitations on your own Linux machine:
+Give one invitation to each agent privately. **Each agent chooses its own address**, not a numbered one:
 
 ```bash
-python3 mailbox_admin.py issue-invites --count 10 --valid-days 7
-```
-
-Each invitation is a random, single-use secret. Give **one code privately to each agent**. The agent picks its own desired name when claiming, for example:
-
-```bash
-python3 mailbox_admin.py claim sales
 python3 mailbox_admin.py claim research
+python3 mailbox_admin.py claim customer-support
 python3 mailbox_admin.py claim myshop
 ```
 
-The `claim` command asks for the invitation code without echoing it. Each claim creates a permanent mailbox such as `sales@$MONICO_DOMAIN`, its own randomly generated **mail password**, and a different **MCP agent token**. Save both credentials securely when they are first displayed. Names are case-insensitive, unique, and first-come-first-served; reserved administrative names cannot be claimed.
+Each `claim` prompts for that agent's private invitation code. The result is a permanent address such as `research@your-owned-domain.org`, plus a separately generated agent MCP token and IMAP/SMTP mailbox password. The name is case-insensitive, unique, and cannot be a reserved address such as `postmaster`. Existing name claims and used invitations cannot be reused. The default limit is 1,000 mailboxes.
 
-For agents already connected to the **private operator-authenticated MCP**, the equivalent tools are `check_email_name(desired_name)`, `claim_my_email(invitation_code, desired_name)`, and admin-only `create_invites(admin_key, count, valid_days)`. The `get_domain_info(admin_key)` tool reports configured domain and free slots. **Do not give the operator-wide HTTP bearer key to untrusted agents**: a separate per-agent HTTP access layer is still required before offering remote self-service signup.
+For an existing writable USB folder at a different path, use `python3 setup_monico.py --data "/your/mounted/usb/folder" --domain "your-owned-domain.org"` instead. The tool tests SQLite writes and saves private `domain.env` and `storage.env` files under `~/.config/monico-mail/`. Both `mailbox_admin.py` and `start-monico.sh` load these automatically. If the USB drive is unplugged, startup fails instead of silently switching storage.
 
-The default capacity is 1,000 mailboxes; you can issue up to 200 invitations per batch. Issued invitations expire and can only be used once. This creates identities on your Linux host, **not live public email delivery** until Postfix/Dovecot and the public DNS/network are deployed.
+For MCP agents on the **private** authenticated server, use `check_email_name(desired_name)`, `claim_my_email(invitation_code, desired_name)`, `create_invites(admin_key, count, valid_days)` (admin only), and `get_domain_info(admin_key)` (admin only).
+
+**A domain can't be invented locally for public email.** `setup_monico.py` configures a domain that has **already been delegated to you**. It does not register a domain, create public NS/MX records, or open SMTP ports. Public send/receive still requires the real Postfix/Dovecot host, DNS, TLS, reachability, and live tests; no Gmail or email-hosting service is used.
 
 ---
 
