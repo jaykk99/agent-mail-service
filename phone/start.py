@@ -20,6 +20,8 @@ import socket
 import subprocess
 import sys
 import time
+import signal
+import threading
 from urllib.error import URLError, HTTPError
 from urllib.request import urlopen
 
@@ -103,11 +105,18 @@ def serve_foreground(state, url, port, background=False):
         print("Internal-only phone extensions: 2000 ... 2999", flush=True)
         print("Local MCP for first agent: bash start.sh --mcp 2000", flush=True)
         print("No public internet email, carrier SMS, or real telephone numbers.", flush=True)
+    # Signal handlers run on the main thread. Request shutdown from a helper
+    # thread to avoid deadlocking serve_forever() on Ctrl+C/service stop.
+    previous_term_handler = signal.getsignal(signal.SIGTERM)
+    def on_terminate(_signum, _frame):
+        threading.Thread(target=server.shutdown, daemon=True).start()
+    signal.signal(signal.SIGTERM, on_terminate)
     try:
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
         pass
     finally:
+        signal.signal(signal.SIGTERM, previous_term_handler)
         server.server_close()
         try:
             if pid_path.read_text().strip() == str(os.getpid()):
