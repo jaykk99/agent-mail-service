@@ -11,6 +11,9 @@ from pathlib import Path
 AGENT_RE = re.compile(r"[A-Za-z0-9_-]{3,128}\Z")
 LOCAL_RE = re.compile(r"[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?\Z")
 RESERVED = {"admin", "postmaster", "abuse", "hostmaster", "webmaster", "security", "root"}
+# System mailboxes are additional operational inboxes, not agent quota slots.
+SYSTEM_AGENT_IDS = ("system_postmaster", "system_abuse")
+AGENT_COUNT_SQL = "SELECT COUNT(*) FROM agents WHERE agent_id NOT IN ('system_postmaster','system_abuse')"
 
 class Registry:
     def __init__(self, directory, domain):
@@ -70,8 +73,8 @@ class Registry:
         return hashlib.sha256(token.encode()).hexdigest()
 
     def register(self, agent_id, desired_name):
-        if not AGENT_RE.fullmatch(agent_id):
-            raise ValueError("Invalid agent ID")
+        if not AGENT_RE.fullmatch(agent_id) or agent_id in SYSTEM_AGENT_IDS:
+            raise ValueError("Invalid or system-reserved agent ID")
         if not LOCAL_RE.fullmatch(desired_name) or ".." in desired_name or desired_name in RESERVED:
             raise ValueError("Invalid or reserved email name")
         with self.connect() as c:
@@ -80,7 +83,7 @@ class Registry:
             if old:
                 return {"email": old[0], "agent_id": agent_id, "existing": True}
             now = int(time.time())
-            used = c.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
+            used = c.execute(AGENT_COUNT_SQL).fetchone()[0]
             table_exists = c.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mailbox_invites'"
             ).fetchone()
@@ -112,9 +115,6 @@ class Registry:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM agents WHERE email=?", (email,)).fetchone():
                 return {"email": email, "agent_id": agent_id, "existing": True}
-            count = db.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
-            if count >= self.capacity:
-                raise ValueError("Mailbox capacity reached")
             agent_token = secrets.token_urlsafe(32)
             mail_password = secrets.token_urlsafe(32)
             now = int(time.time())
@@ -189,5 +189,11 @@ class Registry:
         return {"email": email, "mail_password": password}
 
     def mailbox_count(self):
+        """Number of ordinary agent slots used (system inboxes are additional)."""
+        with self.connect() as c:
+            return c.execute(AGENT_COUNT_SQL).fetchone()[0]
+
+    def total_mailbox_count(self):
+        """Total on-disk mailboxes including postmaster and abuse."""
         with self.connect() as c:
             return c.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
