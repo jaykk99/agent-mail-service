@@ -1,5 +1,32 @@
 # Agent Mail Service
 
+## Run the complete LOCAL agent communication stack on Linux
+
+The older `bash start.sh` launches the phone/internal-message service only.
+To install and launch **both** the phone server and named-mail MCP server
+on your own Debian/Ubuntu/Chromebook Linux:
+
+```bash
+bash linux/install.sh
+# Or, when python3-venv is installed:
+bash start.sh --full up --install
+
+bash start.sh --full doctor
+bash start.sh --full invites --count 5
+bash start.sh --full claim --name research
+```
+
+The combined launcher keeps account credentials in private persistent Linux/USB
+storage, starts the local dashboard on `127.0.0.1:8765` and mailbox MCP on
+`127.0.0.1:8787/mcp`. Restart with `bash start.sh --full up`, check
+`bash start.sh --full status`, and stop with `bash start.sh --full stop`.
+
+See [Linux installation and diagnostics](linux/README.md).
+**This starts the local agent system, not public SMTP, public mobile SMS,
+public telephone numbers, or a verified outside-network service.**
+
+---
+
 ## Use the Calling-linux project
 
 I've integrated the **safe, self-hosted** parts of
