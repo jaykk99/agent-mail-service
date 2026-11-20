@@ -11,7 +11,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "phone"))
@@ -79,8 +79,9 @@ class PublicGatewayTests(unittest.TestCase):
 
     def test_03_tls_rejects_untrusted_connections(self):
         req = Request(self.url + "/health")
-        with self.assertRaises(ssl.SSLCertVerificationError):
+        with self.assertRaises(URLError) as caught:
             urlopen(req, timeout=5)
+        self.assertIsInstance(caught.exception.reason, ssl.SSLCertVerificationError)
 
     def test_04_public_ip_and_port_safety(self):
         for invalid in ("127.0.0.1", "192.168.1.1", "10.0.0.2",
