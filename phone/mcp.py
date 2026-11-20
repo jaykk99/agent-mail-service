@@ -36,6 +36,21 @@ def request(path, payload=None):
 TOOLS = [
     {'name': 'phone_identity', 'description': 'Show this agent’s private internal phone extension.',
      'inputSchema': {'type': 'object', 'properties': {}}},
+    {'name': 'phone_claim', 'description': 'Claim/read this agent’s stable private extension. Not a real mobile number.',
+     'inputSchema': {'type': 'object', 'properties': {}}},
+    {'name': 'routing_status', 'description': 'See which phone and mail routes work locally and which public routes are unavailable.',
+     'inputSchema': {'type': 'object', 'properties': {}}},
+    {'name': 'email_addresses', 'description': 'List this agent’s self-hosted local inbox addresses.',
+     'inputSchema': {'type': 'object', 'properties': {}}},
+    {'name': 'email_create_alias', 'description': 'Reserve a persistent internal mail address on agents.invalid. Not an internet email address.',
+     'inputSchema': {'type': 'object', 'properties': {'prefix': {'type': 'string'}}, 'required': ['prefix']}},
+    {'name': 'email_send', 'description': 'Send a local email to another agent’s agents.invalid address only.',
+     'inputSchema': {'type': 'object', 'properties': {
+         'from': {'type': 'string'}, 'to': {'type': 'string'},
+         'subject': {'type': 'string'}, 'text': {'type': 'string'}},
+         'required': ['from', 'to', 'text']}},
+    {'name': 'email_inbox', 'description': 'Read mail sent to any of this agent’s local email aliases.',
+     'inputSchema': {'type': 'object', 'properties': {'after': {'type': 'integer', 'minimum': 0}}}},
     {'name': 'phone_directory', 'description': 'List local extension numbers of other agents.',
      'inputSchema': {'type': 'object', 'properties': {
          'offset': {'type': 'integer', 'minimum': 0}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100}}}},
@@ -58,6 +73,20 @@ def execute(name, args):
         raise ValueError('Tool arguments must be an object')
     if name == 'phone_identity':
         return request('/api/me')
+    if name == 'phone_claim':
+        return request('/api/phone/claim', {})
+    if name == 'routing_status':
+        return request('/api/routes')
+    if name == 'email_addresses':
+        return request('/api/mailboxes')
+    if name == 'email_create_alias':
+        return request('/api/mailboxes', {'prefix': args['prefix']})
+    if name == 'email_send':
+        return request('/api/email/send', {'from': args['from'], 'to': args['to'],
+                                           'subject': args.get('subject', ''),
+                                           'text': args['text']})
+    if name == 'email_inbox':
+        return request('/api/email/inbox?' + urlencode({'after': args.get('after', 0)}))
     if name == 'phone_directory':
         return request('/api/directory?' + urlencode({'offset': args.get('offset', 0),
                                                        'limit': args.get('limit', 100)}))
