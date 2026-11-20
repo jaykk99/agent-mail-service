@@ -8,14 +8,16 @@ import secrets
 import sqlite3
 import time
 
-from monico_core import LOCAL_RE, RESERVED
+from monico_core import LOCAL_RE, RESERVED, AGENT_COUNT_SQL
 
 
 class MailboxClaims:
-    def __init__(self, registry, capacity=1000):
+    def __init__(self, registry, capacity=None):
         self.registry = registry
-        if not isinstance(capacity, int) or capacity < 1:
-            raise ValueError("Capacity must be a positive integer")
+        if capacity is None:
+            capacity = registry.capacity
+        if not isinstance(capacity, int) or capacity < 1 or capacity > registry.capacity:
+            raise ValueError("Capacity must be 1 through the registry's configured agent capacity")
         self.capacity = capacity
         with registry.connect() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS mailbox_invites (
@@ -56,7 +58,7 @@ class MailboxClaims:
             active = db.execute(
                 "SELECT COUNT(*) FROM mailbox_invites WHERE redeemed IS NULL AND expires>?",
                 (now,)).fetchone()[0]
-            mailboxes = db.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
+            mailboxes = db.execute(AGENT_COUNT_SQL).fetchone()[0]
             if active + mailboxes + count > self.capacity:
                 raise ValueError("Not enough available mailbox slots; use or expire prior invitations")
             db.executemany(
@@ -80,7 +82,7 @@ class MailboxClaims:
                 (code_hash,)).fetchone()
             if row is None or row[0] <= now or row[1] is not None:
                 raise ValueError("Invitation invalid, expired, or already used")
-            mailboxes = db.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
+            mailboxes = db.execute(AGENT_COUNT_SQL).fetchone()[0]
             if mailboxes >= self.capacity:
                 raise ValueError("Mailbox capacity reached")
             agent_id = "mb_" + secrets.token_hex(16)
@@ -104,7 +106,7 @@ class MailboxClaims:
     def slots(self):
         now = int(time.time())
         with self.registry.connect() as db:
-            used = db.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
+            used = db.execute(AGENT_COUNT_SQL).fetchone()[0]
             pending = db.execute(
                 "SELECT COUNT(*) FROM mailbox_invites WHERE redeemed IS NULL AND expires>?",
                 (now,)).fetchone()[0]
