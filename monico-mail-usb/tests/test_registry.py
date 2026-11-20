@@ -93,6 +93,18 @@ class RegistryTests(unittest.TestCase):
         reopened = Registry(self.tmp.name, "mail.example.invalid")
         self.assertEqual(reopened.mailbox_count(), 1)
 
+    def test_reserved_system_inboxes_are_admin_only(self):
+        for local in ("postmaster", "abuse"):
+            with self.assertRaises(ValueError):
+                self.reg.register(f"agent_{local}", local)
+            system = self.reg.provision_system_mailbox(local)
+            self.assertEqual(system["email"], f"{local}@mail.example.invalid")
+            self.assertIn("mail_password", system)
+            self.assertEqual(self.reg.get_email(system["agent_id"], system["token"]), system["email"])
+            self.assertNotIn("mail_password", self.reg.provision_system_mailbox(local))
+        with self.assertRaises(ValueError):
+            self.reg.provision_system_mailbox("root")
+
     def test_missing_usb(self):
         with self.assertRaises(RuntimeError):
             Registry(self.tmp.name + "/missing", "example.invalid")
