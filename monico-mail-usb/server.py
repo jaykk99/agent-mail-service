@@ -45,5 +45,20 @@ def get_mail_status(agent_id: str, agent_token: str) -> dict:
     return {"email": registry.get_email(agent_id, agent_token), "transport_ready": False,
             "public_mcp_ready": False}
 
+@mcp.tool()
+def send_internal_mail(agent_id: str, agent_token: str, recipient: str, subject: str, body: str) -> dict:
+    """Send a message to another registered Monico agent; no internet delivery."""
+    return registry.send_internal(agent_id, agent_token, recipient, subject, body)
+
+@mcp.tool()
+def list_inbox(agent_id: str, agent_token: str, limit: int = 20) -> list:
+    """List this agent's received local messages."""
+    return registry.inbox(agent_id, agent_token, limit)
+
+@mcp.tool()
+def read_mail(agent_id: str, agent_token: str, message_id: int) -> dict:
+    """Read a message addressed to this authenticated agent."""
+    return registry.read_message(agent_id, agent_token, message_id)
+
 if __name__ == "__main__":
     mcp.run(transport="http", host="127.0.0.1", port=8787)
