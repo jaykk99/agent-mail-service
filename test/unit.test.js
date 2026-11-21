@@ -26,6 +26,9 @@ const {
   hashApiKey,
   newAccountRow,
   dkimPublicKeyRecord,
+  rateBucketUsage,
+  windowBucketUsage,
+  quotaForAddress,
 } = require('../server.js');
 
 let failures = 0;
@@ -206,6 +209,29 @@ test('newAccountRow stores only a hash of the account key', () => {
 
 test('dkimPublicKeyRecord is empty when no key is configured', () => {
   assert.equal(dkimPublicKeyRecord(), '');
+});
+
+test('rateBucketUsage peeks without consuming quota', () => {
+  const key = `probe-unit-${Date.now()}`;
+  assert.deepEqual(rateBucketUsage(key, 100), { limit: 100, used: 0, remaining: 100, resetAt: null });
+  // A limit of 0 means disabled: remaining is null (unlimited), used still counts.
+  assert.deepEqual(rateBucketUsage(key, 0), { limit: 0, used: 0, remaining: null, resetAt: null });
+  assert.deepEqual(windowBucketUsage(key), { count: 0, resetAt: null });
+});
+
+test('quotaForAddress reports buckets for a registered address', () => {
+  const addr = `probe-${Date.now()}@mail.example.test`;
+  registerAddress(addr);
+  const q = quotaForAddress(addr);
+  assert.equal(q.address, addr);
+  assert.equal(q.emails, 0);
+  assert.ok(q.createdAt, 'createdAt is set');
+  assert.equal(q.sendPerHour.limit, 100);
+  assert.equal(q.sendPerHour.used, 0);
+  assert.equal(q.sendPerHour.remaining, 100);
+  assert.equal(q.sendPerHour.resetAt, null);
+  assert.equal(q.receivePerHour.limit, 100);
+  assert.equal(q.receivePerHour.used, 0);
 });
 
 if (failures > 0) {

@@ -8,6 +8,8 @@
  * Endpoints:
  *   POST /api/accounts           { name? } -> { account, apiKey } (free signup)
  *   GET  /api/me                 -> calling account + usage (or master summary)
+ *   GET  /api/quota              -> send/receive/creation quota usage (caller-scoped)
+ *   GET  /api/quota/:address     -> quota usage for one address (send + receive buckets)
  *   GET  /api/accounts           -> every account with usage (master only)
  *   GET  /api/dns                -> MX/SPF/DKIM/DMARC records to publish
  *   POST /api/addresses          { prefix } -> { address }
@@ -723,6 +725,44 @@ function rateLimitWindow(key, max, windowMs) {
   bucketState.set(key, entry);
   return entry.count <= max;
 }
+// --- Quota usage reporting (read-only peek at the rate buckets) ---
+// rateLimitExceeded() mutates (it records a hit); these peeks never do, so
+// an agent can ask "how much quota do I have left?" without spending any.
+// resetAt is when the oldest hit in the current window ages out; null when
+// nothing has been used in this window. A limit of 0 means disabled:
+// `remaining` is null (unlimited) and `used` still counts activity.
+function rateBucketUsage(key, maxPerHour, now = Date.now()) {
+  const windowMs = 60 * 60 * 1000;
+  const hits = (rateBuckets.get(key) || []).filter(t => now - t < windowMs);
+  const used = hits.length;
+  const resetAt = hits.length ? new Date(hits[0] + windowMs).toISOString() : null;
+  if (maxPerHour <= 0) return { limit: 0, used, remaining: null, resetAt };
+  return { limit: maxPerHour, used, remaining: Math.max(0, maxPerHour - used), resetAt };
+}
+
+// Fixed-window bucket peek (the global daily send cap and per-IP minute
+// limits live here, not in rateBuckets).
+function windowBucketUsage(key) {
+  const entry = bucketState.get(key);
+  if (!entry) return { count: 0, resetAt: null };
+  return { count: entry.count, resetAt: new Date(entry.resetAt).toISOString() };
+}
+
+// Send/receive quota + mailbox stats for one address. Unknown addresses
+// report null timestamps and zero counts rather than erroring, so a caller
+// can probe quota for an address it is about to use.
+function quotaForAddress(address) {
+  const info = addressInfo(address);
+  return {
+    address,
+    createdAt: info ? info.createdAt : null,
+    lastSeenAt: info ? info.lastSeenAt : null,
+    emails: info ? info.emails : 0,
+    sendPerHour: rateBucketUsage(`send:${address}`, SEND_MAX_PER_HOUR),
+    receivePerHour: rateBucketUsage(`recv:${address}`, EMAILS_PER_ADDRESS_PER_HOUR),
+  };
+}
+
 function addressRateLimit(req, res, next) {
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
   if (!rateLimitWindow(`addr:${ip}`, RATE_LIMIT_PER_MINUTE, 60000)) {
@@ -1707,6 +1747,64 @@ app.get('/api/me', auth, async (req, res) => {
   }
 });
 
+// Quota usage for the caller: per-address send/receive buckets, the
+// address-creation hourly bucket, and the global daily send cap. An account
+// sees only its own addresses; the master token sees every address. Reading
+// quota never consumes any of it (see rateBucketUsage).
+app.get('/api/quota', auth, async (req, res) => {
+  try {
+    const actor = req.auth;
+    const list = await knownAddresses(actor);
+    const createKey = actor.role === 'master' ? 'create:master' : `create:${actor.account.id}`;
+    const daily = windowBucketUsage('send:day:all');
+    const body = {
+      ok: true,
+      role: actor.role,
+      domain: DOMAIN,
+      addresses: list.map(a => quotaForAddress(a.address)),
+      addressCreationPerHour: rateBucketUsage(createKey, ADDRESS_CREATE_MAX_PER_HOUR),
+      sendPerDay: SEND_MAX_PER_DAY > 0
+        ? {
+            limit: SEND_MAX_PER_DAY,
+            used: daily.count,
+            remaining: Math.max(0, SEND_MAX_PER_DAY - daily.count),
+            resetAt: daily.resetAt,
+          }
+        : { limit: 0, used: daily.count, remaining: null, resetAt: daily.resetAt },
+    };
+    if (actor.role !== 'master') {
+      body.addressQuota = {
+        limit: actor.account.addressQuota,
+        used: list.length,
+        remaining: Math.max(0, actor.account.addressQuota - list.length),
+      };
+    }
+    res.json(body);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Quota usage for one address. 404 when the address is unknown to the
+// service or belongs to another account; 400 for a malformed address.
+app.get('/api/quota/:address', auth, async (req, res) => {
+  try {
+    const addr = decodeURIComponent(req.params.address).toLowerCase();
+    if (!validAddressParam(addr)) {
+      return res.status(400).json({ ok: false, error: 'Invalid address format' });
+    }
+    if (!(await canAccessAddress(req, addr))) {
+      return res.status(404).json({ ok: false, error: 'Not found' });
+    }
+    if ((await ownershipFor(addr)) === undefined) {
+      return res.status(404).json({ ok: false, error: 'Not found' });
+    }
+    res.json({ ok: true, ...quotaForAddress(addr) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Every account with usage — admin only. API keys are never returned, only
 // their prefixes so an operator can tell accounts apart.
 app.get('/api/accounts', auth, requireMaster, async (req, res) => {
@@ -2061,6 +2159,9 @@ module.exports = {
   registerAddress,
   ownershipFor,
   canAccessAddress,
+  rateBucketUsage,
+  windowBucketUsage,
+  quotaForAddress,
   newApiKey,
   hashApiKey,
   newAccountRow,

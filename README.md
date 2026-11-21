@@ -263,6 +263,8 @@ ones get a 400, and another account's address answers 404.
 | GET | `/health` | `{ ok, domain, storage, addresses, relay, outbound, outboundConfigured, webhook, addressTtlHours, retentionDays, deadLetters, retryQueue }` (no auth) |
 | POST | `/api/accounts` | free signup: `{ name? }` -> `{ account, apiKey }` (key shown once) |
 | GET | `/api/me` | caller identity + usage (account key, or master summary) |
+| GET | `/api/quota` | quota usage for the caller: per-address send/receive buckets, address-creation bucket, global daily send cap (account-scoped; master sees all) |
+| GET | `/api/quota/:address` | quota usage for one address (`sendPerHour`, `receivePerHour`, each `{ limit, used, remaining, resetAt }`) |
 | GET | `/api/accounts` | every account with usage counts (master only) |
 | GET | `/api/dns` | MX/SPF/DKIM/DMARC records to publish (no auth) |
 | POST | `/api/inbound` | Worker delivery only: `{ to, from, subject, text, html, messageId?, date? }` -> `{ ok, stored, id?, duplicate? }` (Bearer inbound secret) |
@@ -397,6 +399,12 @@ to send. Without it everything is in memory and lost on restart.
     address-creation quota per rolling hour.
   - `EMAILS_PER_ADDRESS_PER_HOUR` (default 100; 0 disables) — excess
     inbound mail for one address is dropped with a warning.
+  - **Quota reporting**: `GET /api/quota` (all of the caller's addresses)
+    and `GET /api/quota/:address` report each bucket as `{ limit, used,
+    remaining, resetAt }` — `remaining` is `null` when that limit is
+    disabled (unlimited), `resetAt` is when the oldest hit ages out. Reading
+    quota never consumes any of it, so agents can check before they send
+    instead of discovering a 429 after the fact.
 - **Incoming-mail webhook**: set `INCOMING_WEBHOOK_URL` (and optionally
   `INCOMING_WEBHOOK_SECRET`) to receive a JSON POST per email. When the
   secret is set the body carries `X-AgentMail-Signature:

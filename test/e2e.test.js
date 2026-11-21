@@ -16,6 +16,7 @@
  *   - local /dashboard HTML UI (unauthenticated page, token client-side only)
  *   - address TTL auto-cleanup sweep on a short-TTL server
  *   - address-creation 429 + per-address SMTP receive rate limits
+ *   - per-address quota reporting (GET /api/quota, GET /api/quota/:address)
  *   - (merged from origin) invalid address param 400, prefix truncation to 64
  *   - (merged from origin) inbox pagination via limit/offset
  *   - (merged from origin) verify-link long-poll /wait (immediate + timeout)
@@ -373,6 +374,51 @@ async function waitForHealth(child, timeoutMs = 15000) {
         body: JSON.stringify({ from: address, to: 'dest@example.com', subject: 'x', text: 'y' }),
       });
       assert.equal(r.status, 401);
+    });
+
+    await test('GET /api/quota reports per-address buckets and creation quota', async () => {
+      const r = await fetch(`${BASE}/api/quota`, { headers });
+      const j = await r.json();
+      assert.equal(r.status, 200);
+      assert.equal(j.ok, true);
+      assert.equal(j.role, 'master');
+      const entry = j.addresses.find(a => a.address === address);
+      assert.ok(entry, 'created address is listed');
+      assert.equal(entry.sendPerHour.limit, 100);
+      assert.equal(entry.sendPerHour.used, 1, 'the one relay send is counted');
+      assert.equal(entry.sendPerHour.remaining, 99);
+      assert.match(entry.sendPerHour.resetAt, /^\d{4}-\d{2}-\d{2}T/, 'resetAt is ISO');
+      assert.equal(entry.receivePerHour.limit, 100);
+      assert.equal(entry.receivePerHour.used, 0, 'no mail received yet');
+      assert.equal(entry.receivePerHour.remaining, 100);
+      assert.equal(entry.receivePerHour.resetAt, null);
+      assert.equal(j.addressCreationPerHour.limit, 20);
+      assert.ok(j.addressCreationPerHour.used >= 2, `two creations so far, got ${j.addressCreationPerHour.used}`);
+      assert.equal(j.sendPerDay.limit, 0, 'daily cap disabled by default');
+      assert.equal(j.sendPerDay.remaining, null);
+      // Creating one more address bumps the creation bucket by exactly one.
+      const before = j.addressCreationPerHour.used;
+      const cr = await fetch(`${BASE}/api/addresses`, { method: 'POST', headers, body: JSON.stringify({ prefix: 'quota-probe' }) });
+      assert.equal(cr.status, 200);
+      const after = await (await fetch(`${BASE}/api/quota`, { headers })).json();
+      assert.equal(after.addressCreationPerHour.used, before + 1);
+      assert.ok(after.addresses.some(a => a.address === 'quota-probe@mail.example.test'));
+    });
+
+    await test('GET /api/quota/:address returns one address and guards access', async () => {
+      const r = await fetch(`${BASE}/api/quota/${encodeURIComponent(address)}`, { headers });
+      const j = await r.json();
+      assert.equal(r.status, 200);
+      assert.equal(j.ok, true);
+      assert.equal(j.address, address);
+      assert.equal(j.sendPerHour.used, 1);
+      assert.equal(j.receivePerHour.used, 0);
+      const bad = await fetch(`${BASE}/api/quota/not-an-address`, { headers });
+      assert.equal(bad.status, 400);
+      const missing = await fetch(`${BASE}/api/quota/${encodeURIComponent('nobody@mail.example.test')}`, { headers });
+      assert.equal(missing.status, 404);
+      const anon = await fetch(`${BASE}/api/quota/${encodeURIComponent(address)}`);
+      assert.equal(anon.status, 401);
     });
 
     await test('verify-link returns nothing before any mail arrives', async () => {
