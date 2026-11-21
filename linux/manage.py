@@ -298,7 +298,7 @@ def main():
                         choices=("up", "status", "doctor", "release", "stop", "install", "invites", "claim"))
     parser.add_argument("--install", action="store_true",
                         help="On 'up', create venv and install FastMCP from PyPI")
-    parser.add_argument("--domain", help="Initial domain (default mail.example.invalid for local tests)")
+    parser.add_argument("--domain", help="Initial domain (default agents.local for local agent networking)")
     parser.add_argument("--state-dir", help="Explicit private phone/MCP data directory")
     parser.add_argument("--scope", default="local",
                         choices=("local", "public-web", "internet-mail", "carrier-phone", "all"),
