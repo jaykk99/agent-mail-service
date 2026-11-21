@@ -227,6 +227,7 @@ PY
     say "Once paired, run monico-usb on Termux or Linux to see drives attached to Linux."
     say "Proxy-aware Termux commands automatically use Linux internet after pairing"
     say "(open a new Termux shell). Disable with: monico-net off"
+    say "To re-enable Linux internet proxy manually, use: monico-net on"
     say "Android-wide internet is not provided by the Termux proxy."
     "$HOME/.local/bin/monico-usb" || true
     say "To check later: bash $ROOT/linux/cohost.sh status"
