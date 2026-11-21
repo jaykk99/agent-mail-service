@@ -848,6 +848,8 @@ async function waitForHealth(child, timeoutMs = 15000) {
       const text = await r.text();
       assert.ok(text.includes('Agent Mail Service'), 'dashboard HTML missing title');
       assert.ok(text.includes('sessionStorage'), 'dashboard should keep the token client-side only');
+      assert.ok(text.includes("fetch('/api/relay'"), 'dashboard shows relay health');
+      assert.ok(text.includes("fetch('/api/quota'"), 'dashboard shows quota usage');
     });
 
     // --- New: health exposes new status fields (union of both sides) ---

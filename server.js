@@ -2157,6 +2157,8 @@ pre{white-space:pre-wrap;background:#13151b;padding:12px;border-radius:6px;borde
 <button onclick="save()">Use token</button>
 <span class="meta">stored in sessionStorage only</span></div>
 <div id="app" style="display:none">
+<h2>Relay</h2><div id="relay"><span class="meta">loading…</span></div>
+<h2>Quota</h2><div id="quota"><span class="meta">loading…</span></div>
 <h2>Addresses</h2><div id="addrs"></div>
 <h2 id="inboxtitle">Inbox</h2>
 <div><input id="q" placeholder="search subject/from/body" size="32">
@@ -2168,9 +2170,31 @@ pre{white-space:pre-wrap;background:#13151b;padding:12px;border-radius:6px;borde
 <script>
 let current=null,page=1;
 function save(){const t=document.getElementById('token').value.trim();if(!t)return;
-sessionStorage.setItem('amt',t);document.getElementById('app').style.display='block';loadAddrs();}
+sessionStorage.setItem('amt',t);document.getElementById('app').style.display='block';loadRelay();loadQuota();loadAddrs();}
 function H(){return {Authorization:'Bearer '+sessionStorage.getItem('amt')};}
 async function j(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}
+async function loadRelay(){
+ try{
+  const d=await j(await fetch('/api/relay',{headers:H()}));
+  document.getElementById('relay').innerHTML='<span class="meta">'+esc(d.provider)+' relay — probe: <b>'+esc(d.probe)+'</b> — '+esc(d.detail||'')+'</span> <span class="tag">'+esc(d.configured?'configured':'unconfigured')+'</span>';
+ }catch(e){
+  document.getElementById('relay').innerHTML='<span class="meta">relay status unavailable (master token required)</span>';
+ }
+}
+async function loadQuota(){
+ try{
+  const d=await j(await fetch('/api/quota',{headers:H()}));
+  let h='<table><tr><th>Address</th><th>Send / hour</th><th>Receive / hour</th><th>Resets</th></tr>';
+  for(const a of d.addresses){
+   const s=a.sendPerHour,r=a.receivePerHour;
+   h+='<tr><td>'+esc(a.address)+'</td><td>'+s.used+' / '+s.limit+(s.remaining===null?'':' ('+s.remaining+' left)')+'</td><td>'+r.used+' / '+r.limit+(r.remaining===null?'':' ('+r.remaining+' left)')+'</td><td>'+esc(s.resetAt||r.resetAt||'—')+'</td></tr>';
+  }
+  h+='</table><div class="meta">address creation this hour: '+d.addressCreationPerHour.used+' / '+d.addressCreationPerHour.limit+'</div>';
+  document.getElementById('quota').innerHTML=h;
+ }catch(e){
+  document.getElementById('quota').innerHTML='<span class="meta">quota unavailable</span>';
+ }
+}
 async function loadAddrs(){
  const d=await j(await fetch('/api/addresses',{headers:H()}));
  document.getElementById('addrs').innerHTML='<table><tr><th>Address</th><th>Emails</th><th>Created</th><th>Last seen</th></tr>'+
@@ -2204,7 +2228,7 @@ async function viewEmail(id){
  window.scrollTo(0,document.body.scrollHeight);
 }
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-if(sessionStorage.getItem('amt')){document.getElementById('app').style.display='block';loadAddrs();}
+if(sessionStorage.getItem('amt')){document.getElementById('app').style.display='block';loadRelay();loadQuota();loadAddrs();}
 </script></body></html>`);
 });
 
