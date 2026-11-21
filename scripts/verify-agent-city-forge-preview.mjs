@@ -62,7 +62,7 @@ for (const scenario of scenarios) {
       const wallet=await dialog.getByText(/Citizens with Vouchers/).first().innerText();
       observed.walletVisible=/\d/.test(wallet);
       observed.walletText=wallet.slice(0,160);
-      await dialog.getByRole('button',{name:'Talk app'}).click();
+      await dialog.getByRole('button',{name:'Memory app'}).click();
       const memory = dialog.getByRole('region',{name:'Citizen memory'});
       await memory.waitFor({state:'visible',timeout:14000});
       observed.memoryOpen=true;
