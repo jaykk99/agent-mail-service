@@ -8,6 +8,60 @@ responses and is a separate optional backend. See the
 [Render recovery guide](RENDER_RECOVERY.md). A green GitHub CI run is not a
 public mail or telephone network connection.
 
+## Plug-and-play: Agent Mail + Lin-2-Mux on one Linux computer
+
+On Debian, Ubuntu or Chromebook Linux, paste **one command** into
+the Linux terminal (internet is needed for the first setup):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jaykk99/agent-mail-service/main/install.sh | bash
+```
+
+The script obtains both official repositories, installs OS/Python dependencies
+(requesting a sudo password only if missing), installs the full Agent Mail
+service, installs Lin-2-Mux, starts both in the background and verifies the
+local ports. It never asks for a USB drive name, email address, configuration
+edit or token. Repeat the same command to update; it only uses fast-forward
+Git updates and refuses to overwrite unrelated files.
+
+If you do not want to execute a fetched script directly, use the equivalent
+two commands instead:
+
+```bash
+git clone https://github.com/jaykk99/agent-mail-service.git ~/agent-mail-service
+bash ~/agent-mail-service/install.sh
+```
+
+**Local addresses:** Agent Mail dashboard `http://127.0.0.1:8765`,
+mailbox MCP `http://127.0.0.1:8787/mcp`, and Lin-2-Mux dashboard
+`http://127.0.0.1:8767/dashboard`. The installer prints a **fresh pairing
+code** and a ready-to-copy direct Termux command. On Termux, update/install
+Lin-2-Mux once and run `monico-connect`. If UDP WiFi discovery is blocked,
+paste the direct `monico-connect --server http://IP:8767` command printed
+by Linux; no script edits are needed.
+
+Once paired, `monico-usb` on Linux or Termux shows attached USB volumes
+Linux can detect, including mounted Chromebook removable shares. Agent Mail
+automatically chooses appropriate USB storage with private Unix file
+permissions and otherwise safely uses Linux internal storage; it never
+formats or mounts devices. Viewing USB metadata is not direct Android
+filesystem access. Linux command forwarding can inspect files the Linux user
+has permission to read.
+
+Useful lifecycle commands:
+
+```bash
+bash ~/agent-mail-service/linux/cohost.sh status
+bash ~/agent-mail-service/linux/cohost.sh doctor
+bash ~/agent-mail-service/linux/cohost.sh stop
+```
+
+**Scope:** The installer starts local agent mail/phone messaging and the
+local bridge. Public SMTP, PSTN/SMS, and a public internet email domain still
+require real DNS/network/carrier infrastructure and independent verification.
+A Chromebook Linux container may need an authorized ADB reverse tunnel or
+an explicitly configured HTTPS tunnel for remote Termux connectivity.
+
 ## Run the complete LOCAL agent communication stack on Linux
 
 The older `bash start.sh` launches the phone/internal-message service only.
