@@ -87,8 +87,13 @@ checkout_bridge() {
         fi
     elif [[ -d "$BRIDGE_DIR/.git" ]]; then
         say "Updating existing Lin-2-Mux checkout without overwriting local changes."
-        git -C "$BRIDGE_DIR" pull --ff-only ||
-            fail "Lin-2-Mux contains diverging changes. Resolve them before an automatic update."
+        # An existing Linux installation must remain usable even while
+        # neither device has internet. A failed update must never prevent
+        # serving the last working local copy or rotate agent identities.
+        if ! timeout 18 git -C "$BRIDGE_DIR" pull --ff-only; then
+            say "GitHub unavailable or checkout not fast-forwardable."
+            say "Keeping the existing Lin-2-Mux files; offline services continue."
+        fi
     elif [[ ! -e "$BRIDGE_DIR" ]]; then
         git clone https://github.com/jaykk99/linuxtomux.git "$BRIDGE_DIR"
     else
