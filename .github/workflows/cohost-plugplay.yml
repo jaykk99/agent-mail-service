@@ -1,0 +1,143 @@
+name: One-paste Agent Mail + Lin-2-Mux Linux verification
+on:
+  push:
+    paths:
+      - 'install.sh'
+      - 'linux/cohost.sh'
+      - 'test/test_cohost_installer.py'
+      - '.github/workflows/cohost-plugplay.yml'
+  pull_request:
+    paths:
+      - 'install.sh'
+      - 'linux/cohost.sh'
+      - 'test/test_cohost_installer.py'
+      - '.github/workflows/cohost-plugplay.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-plugplay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the corresponding Lin-2-Mux fixes
+        uses: actions/checkout@v4
+        with:
+          repository: jaykk99/linuxtomux
+          ref: main
+          path: lin
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Check non-destructive installer contracts
+        run: python3 -m unittest discover -s test -p 'test_cohost_installer.py' -v
+
+      - name: Install and start all three local services (no user edits)
+        env:
+          MONICO_BRIDGE_SOURCE: ${{ github.workspace }}/lin
+          MONICO_BRIDGE_DIR: ${{ runner.temp }}/linuxtomux-installed
+          MONICO_USB_TEST_MOUNT: ${{ runner.temp }}/simulated-usb
+        run: |
+          mkdir -p "$MONICO_USB_TEST_MOUNT"
+          bash install.sh
+          bash linux/cohost.sh status
+          bash linux/cohost.sh doctor
+
+      - name: Verify mailbox service, real pairing and Linux USB from simulated phone
+        env:
+          MONICO_USB_TEST_MOUNT: ${{ runner.temp }}/simulated-usb
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, sys, tempfile, time, urllib.request
+          from pathlib import Path
+          root = Path.cwd()
+          sim = Path(os.environ["RUNNER_TEMP"]) / "simulated-phone"
+          sim.mkdir(exist_ok=True)
+          env = dict(os.environ)
+          env["HOME"] = str(sim)
+          env["MONICO_HOME"] = str(sim / "client-store")
+
+          status = json.loads(subprocess.check_output(["bash", "start.sh", "--full", "status"], text=True))
+          assert status["phone_online_local"], status
+          assert status["mcp_online_local"], status
+          assert status["internal_network_usable"], status
+          assert not status["public_internet_mail_verified"], status
+          with urllib.request.urlopen("http://127.0.0.1:8767/health", timeout=5) as response:
+              assert json.load(response)["service"] == "monico-bridge"
+
+          pair = subprocess.check_output([str(Path.home() / ".local/bin/monico-pair")], text=True)
+          code = re.search(r"4-DIGIT CODE:\s*(\d{4})", pair)
+          assert code, pair
+          with tempfile.TemporaryFile() as clientlog:
+              phone = subprocess.Popen([
+                  sys.executable, str(root / "lin" / "monico-connect"),
+                  "--server", "http://127.0.0.1:8767", code.group(1)],
+                  env=env, stdout=clientlog, stderr=subprocess.STDOUT)
+              try:
+                  deadline = time.monotonic() + 20
+                  while time.monotonic() < deadline:
+                      assert phone.poll() is None, "phone client exited"
+                      config = sim / "client-store" / "client.json"
+                      if config.exists() and json.loads(config.read_text()).get("key"):
+                          break
+                      time.sleep(.2)
+                  else:
+                      raise AssertionError("simulated Termux failed to pair")
+
+                  usb = subprocess.check_output(
+                      [sys.executable, str(root / "lin" / "monico-usb"), "--json"],
+                      env=env, text=True, timeout=10)
+                  result = json.loads(usb)
+                  drives = [disk for srv in result["servers"] for disk in srv["usb"]]
+                  assert any(d.get("path") == os.environ["MONICO_USB_TEST_MOUNT"]
+                             and d.get("mounted") for d in drives), result
+
+                  cmd = subprocess.check_output([
+                      sys.executable, str(root / "lin" / "monico-cmd"),
+                      "linux", "printf phone-to-linux-ok"],
+                      env=env, text=True, timeout=15)
+                  assert cmd == "phone-to-linux-ok", cmd
+                  print("PASS: Agent Mail phone + MCP; actual 4-digit TCP pairing; remote USB inventory; phone -> Linux shell")
+              finally:
+                  phone.terminate()
+                  try: phone.wait(timeout=5)
+                  except subprocess.TimeoutExpired: phone.kill(); phone.wait()
+          PY
+
+      - name: Cleanly stop both installed services
+        if: always()
+        run: bash linux/cohost.sh stop || true
+
+  one-line-main-bootstrap:
+    # Only main contains the finished public installer. Check the exact
+    # user-facing curl|bash command after merge, in a fresh runner.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Launch from a clean directory using the public installer
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL https://raw.githubusercontent.com/jaykk99/agent-mail-service/main/install.sh | bash
+          bash "$HOME/agent-mail-service/linux/cohost.sh" status
+          python3 - <<'PY'
+          import json, subprocess, urllib.request
+          from pathlib import Path
+          script = Path.home() / "agent-mail-service" / "start.sh"
+          status = json.loads(subprocess.check_output(
+              ["bash", str(script), "--full", "status"], text=True))
+          assert status["phone_online_local"] and status["mcp_online_local"], status
+          with urllib.request.urlopen("http://127.0.0.1:8767/health", timeout=5) as resp:
+              assert json.load(resp)["service"] == "monico-bridge"
+          print("PASS: exact public one-line curl installer started all services")
+          PY
+      - name: Stop installed services
+        if: always()
+        run: |
+          if [ -f "$HOME/agent-mail-service/linux/cohost.sh" ]; then
+            bash "$HOME/agent-mail-service/linux/cohost.sh" stop || true
+          fi
