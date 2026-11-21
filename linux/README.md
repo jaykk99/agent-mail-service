@@ -14,6 +14,46 @@ public internet SMTP/IMAP deployment. The local mail registry and the phone
 message database are two separate databases nested under the same protected
 storage root. The browser dashboard does not yet display Dovecot Internet mail.
 
+## Android works without its own internet
+
+The one-command Agent Mail + Lin-2-Mux launcher installs a bridge on
+Linux TCP **8767** and prints a fresh four-digit code. The Termux phone
+does **not** need WiFi internet or cellular data to operate locally:
+it only needs a connection to Linux. Options are shared local WiFi,
+an existing hotspot LAN, or an authorized USB debugging / ADB reverse
+connection.
+
+With a phone connected over an authorized USB cable the Linux setup
+enables `adb reverse tcp:8767 tcp:8767` when ADB is installed.
+In Termux, run `monico-connect` and enter the code. A new Termux
+installation can fetch directly from the Linux computer, with no
+GitHub access from Android:
+
+```bash
+curl -fsSL http://127.0.0.1:8767/install-termux.sh | bash -s -- http://127.0.0.1:8767
+```
+
+Termux must already have Bash, curl, and Python installed; if missing,
+those packages require a one-time installation. Android must authorize
+USB debugging on the Linux host (cannot be bypassed automatically).
+When connected on WiFi, the Linux launcher prints its exact LAN URL and
+`monico-connect --server http://LAN_ADDRESS:8767` if UDP discovery
+is filtered. **Do not edit or hard-code an IP in the scripts.**
+
+After pairing, `monico-usb` on the phone lists USB mounts Linux can
+see and is read-only. `monico-net status` checks Linux HTTP proxy
+sharing. Proxy-aware Termux commands can use the Linux network when
+Linux has internet; no carrier data is required on the phone. This is
+not full Android system-wide internet. Agent Mail and Lin-2-Mux local
+features still work when **neither machine has internet**, provided
+the USB or LAN connection remains active.
+
+Re-running `bash ~/agent-mail-service/install.sh` with an existing
+checkout starts the local services using their existing files even
+if a GitHub update fails because the internet is unavailable.
+The first-time installation of Python dependencies and repositories
+does require internet on Linux, unless the dependencies were cached.
+
 ## Install on Debian, Ubuntu or Chromebook Crostini
 
 ~~~bash

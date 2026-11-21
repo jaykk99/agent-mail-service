@@ -2,7 +2,35 @@
 
 A plug-and-play, 100% self-hosted communication stack for **1,000 agent email addresses** and **1,000 phone extensions** on Linux — with **zero third-party API keys**, **zero secret environment variables**, and **zero required domains**.
 
-## Quick Start (Plug and Play)
+## One-command Linux + offline Android (recommended)
+
+For a new Debian/Ubuntu/Chromebook Linux installation, copy and paste:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jaykk99/agent-mail-service/main/install.sh | bash
+```
+
+This installs and starts the **Linux Agent Mail services** on ports
+`8765` (dashboard), `8787` (MCP), and **Lin-2-Mux** on `8767`.
+USB storage is auto-detected. The installer prints a fresh pairing
+code and Linux's direct address: Termux can connect with no mobile
+data when it has a local WiFi/hotspot connection or an **authorized
+ADB USB connection**. No config edits or paid APIs required.
+A Linux USB connection can also serve the Termux installer locally:
+
+```bash
+curl -fsSL http://127.0.0.1:8767/install-termux.sh | bash -s -- http://127.0.0.1:8767
+```
+
+Run that line on **Termux** only after Linux has configured ADB reverse
+and the Termux `bash`, `curl` and `python3` packages are installed.
+The browser is local-only by default; public email requires a
+registered/delegated domain, SMTP reachability and real external tests.
+A Linux HTTP proxy can share Linux internet with proxy-aware Termux
+commands, **not with every Android app**. See [Linux/Android details](linux/README.md).
+
+## Alternative legacy Node local app
+
 
 ```bash
 bash start.sh

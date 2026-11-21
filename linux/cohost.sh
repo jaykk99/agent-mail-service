@@ -87,8 +87,12 @@ checkout_bridge() {
         fi
     elif [[ -d "$BRIDGE_DIR/.git" ]]; then
         say "Updating existing Lin-2-Mux checkout without overwriting local changes."
-        git -C "$BRIDGE_DIR" pull --ff-only ||
-            fail "Lin-2-Mux contains diverging changes. Resolve them before an automatic update."
+        # Preserve the last working checkout if this Linux box is offline.
+        # Never rotate agent keys just because GitHub cannot be reached.
+        if ! timeout 18 git -C "$BRIDGE_DIR" pull --ff-only; then
+            say "GitHub unavailable or checkout not fast-forwardable."
+            say "Keeping the existing Lin-2-Mux files; offline services continue."
+        fi
     elif [[ ! -e "$BRIDGE_DIR" ]]; then
         git clone https://github.com/jaykk99/linuxtomux.git "$BRIDGE_DIR"
     else
@@ -134,6 +138,47 @@ PY
     fail "Lin-2-Mux did not become healthy. Inspect $BRIDGE_LOG."
 }
 
+# ADB reverse is optional: authorized USB creates a local phone ->
+# Linux network link even if the phone has no WiFi or cellular data.
+ensure_adb() {
+    if command -v adb >/dev/null 2>&1; then return 0; fi
+    if [[ "${MONICO_SKIP_ADB_INSTALL:-0}" == "1" ]]; then return 1; fi
+    if ! command -v apt-get >/dev/null 2>&1; then
+        say "ADB not installed. Use the LAN path or install Android platform-tools."
+        return 1
+    fi
+    local apt=(apt-get)
+    if [[ "$EUID" -ne 0 ]]; then
+        if ! command -v sudo >/dev/null 2>&1; then
+            say "ADB not installed and sudo unavailable. LAN pairing still works."
+            return 1
+        fi
+        apt=(sudo apt-get)
+    fi
+    say "Installing Android platform tools (ADB) for offline USB pairing."
+    if "${apt[@]}" update && "${apt[@]}" install -y adb; then
+        return 0
+    fi
+    say "ADB package installation failed. Local WiFi pairing remains available."
+    return 1
+}
+
+enable_usb_reverse() {
+    command -v adb >/dev/null 2>&1 || return 1
+    # Android must have USB debugging enabled and the computer authorized.
+    local status
+    status="$(adb devices 2>/dev/null || true)"
+    if grep -qE '^[[:alnum:]_.:-]+[[:space:]]+device$' <<<"$status"; then
+        if adb reverse "tcp:$BRIDGE_PORT" "tcp:$BRIDGE_PORT" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+    if grep -q 'unauthorized' <<<"$status"; then
+        say "USB debugging authorization required: accept the prompt on Android."
+    fi
+    return 1
+}
+
 print_device_help() {
     say ""
     say "Both services started locally on this Linux machine:"
@@ -141,8 +186,17 @@ print_device_help() {
     say "  Agent Mail MCP:       http://127.0.0.1:8787/mcp"
     say "  Lin-2-Mux dashboard:  http://127.0.0.1:8767/dashboard"
     say ""
+    local usb_ready=0
+    if enable_usb_reverse; then usb_ready=1; fi
     say "Pair your Android Termux phone with the fresh 4-digit code below."
     "$HOME/.local/bin/monico-pair"
+    if (( usb_ready )); then
+        say "USB offline bridge: authorized and ready (no Android internet needed)."
+        say "Run monico-connect on Termux and type the code."
+        say "To install Termux bridge without internet, paste on Termux:"
+        say "  curl -fsSL http://127.0.0.1:$BRIDGE_PORT/install-termux.sh | bash -s -- http://127.0.0.1:$BRIDGE_PORT"
+        say "Termux must already have Python, Bash and curl packages installed."
+    fi
     local ip
     ip="$(python3 - <<'PY'
 import socket
@@ -163,14 +217,18 @@ PY
         say "Chromebook Linux note: its container IP may not be reachable from Android."
         say "Use an authorized ADB reverse tunnel or an explicitly enabled HTTPS tunnel."
     fi
-    if command -v adb >/dev/null 2>&1 && adb devices 2>/dev/null | grep -qE 'device$'; then
-        if adb reverse tcp:$BRIDGE_PORT tcp:$BRIDGE_PORT >/dev/null 2>&1; then
-            say "ADB USB tunnel enabled. From Termux use:"
-            say "  monico-connect --server http://127.0.0.1:$BRIDGE_PORT"
-        fi
+    if (( usb_ready )); then
+        say "USB direct connect: monico-connect --server http://127.0.0.1:$BRIDGE_PORT"
+    else
+        say "For USB, enable Android USB debugging and authorize Linux once."
+        say "Re-run the same Linux installer after connecting and approving USB."
     fi
     say ""
     say "Once paired, run monico-usb on Termux or Linux to see drives attached to Linux."
+    say "Proxy-aware Termux commands automatically use Linux internet after pairing"
+    say "(open a new Termux shell). Disable with: monico-net off"
+    say "To re-enable Linux internet proxy manually, use: monico-net on"
+    say "Android-wide internet is not provided by the Termux proxy."
     "$HOME/.local/bin/monico-usb" || true
     say "To check later: bash $ROOT/linux/cohost.sh status"
     say "Public Internet email still needs real DNS, reachable SMTP and external tests."
@@ -195,6 +253,7 @@ case "$ACTION" in
         bash "$BRIDGE_DIR/install-linux.sh"
         start_bridge
         bridge_health || fail "Lin-2-Mux health endpoint is unavailable."
+        ensure_adb || true
         print_device_help
         ;;
     status|doctor)

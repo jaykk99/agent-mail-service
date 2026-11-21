@@ -96,7 +96,7 @@ jobs:
           r = json.load(open(sys.argv[1]))
           assert r['internal_network_usable'], r
           assert r['phone_online_local'] and r['mcp_online_local'], r
-          assert r['mailbox_domain'] == 'mail.example.invalid'
+          assert r['mailbox_domain'] == 'agents.local'
           assert r['mailbox_count'] == 0
           assert r['public_internet_mail_verified'] is False
           print("Both live Linux services started with private storage")
@@ -113,7 +113,7 @@ jobs:
           invitation = json.load(open(sys.argv[1]))['codes'][0]
           _, _, reg = mgr.registry(Path(sys.argv[2]))
           account = mgr.MailboxClaims(reg).claim(invitation, 'support-center')
-          assert account['email'] == 'support-center@mail.example.invalid'
+          assert account['email'] == 'support-center@agents.local'
           assert reg.mailbox_count() == 1
           print('Self-selected account and secrets persisted successfully')
           PY
@@ -169,7 +169,7 @@ jobs:
           r=json.load(open(sys.argv[1]))
           assert r['phone_online_local'] and r['mcp_online_local']
           assert r['mailbox_count']==1
-          assert r['mailbox_domain']=='mail.example.invalid'
+          assert r['mailbox_domain']=='agents.local'
           print("Restart preserved both services and self-selected mailbox identity")
           PY
           sha256sum -c "$RUNNER_TEMP/pre-restart-hashes"
