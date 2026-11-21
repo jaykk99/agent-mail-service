@@ -170,6 +170,22 @@ normalise_domain() {
   printf '%s\n' "$domain"
 }
 
+# Confirm a freshly claimed name points here; propagation lag is a warning.
+verify_free_domain() {
+  local domain="$1" expect="${2:-}" detail
+  local args=(--check "$domain")
+  [[ -n "$expect" ]] && args+=(--expect-ip "$expect")
+  if detail="$("$PYTHON" "$ROOT/linux/free_domain.py" "${args[@]}" 2>&1)"; then
+    printf 'DNS verified: %s resolves to %s.\n' "$domain" "${expect:-your public IP}" >&2
+    return 0
+  fi
+  printf 'WARNING: %s is claimed, but DNS does not match this host yet.\n' "$domain" >&2
+  printf '  %s\n' "$detail" >&2
+  printf '  DuckDNS usually publishes within 60 seconds; re-check with:\n' >&2
+  printf '  python3 %s --check %s%s\n' "$ROOT/linux/free_domain.py" "$domain" "${expect:+ --expect-ip $expect}" >&2
+  printf '  Until then the name points somewhere other than this machine.\n' >&2
+}
+
 # Claim a free DuckDNS name; prints the domain, or nothing when it cannot.
 claim_free_domain() {
   local token="${DUCKDNS_TOKEN:-}"
@@ -190,7 +206,7 @@ claim_free_domain() {
     printf '%s\n' "$token" >"$TOKEN_FILE"
     chmod 600 "$TOKEN_FILE"
   fi
-  local args=(--prefix monico) output domain
+  local args=(--prefix monico) output domain ip
   [[ -n "$PUBLIC_IP" ]] && args+=(--ip "$PUBLIC_IP")
   if ! output="$(DUCKDNS_TOKEN="$token" "$PYTHON" "$ROOT/linux/free_domain.py" "${args[@]}" 2>&1)"; then
     printf 'Monico autostart: free domain not claimed: %s\n' "$output" >&2
@@ -199,12 +215,15 @@ claim_free_domain() {
   fi
   domain="$(printf '%s' "$output" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["domain"])' 2>/dev/null)" \
     || domain=""
+  ip="$(printf '%s' "$output" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["ip"])' 2>/dev/null)" \
+    || ip=""
   if [[ -z "$domain" ]]; then
     printf 'Monico autostart: DuckDNS answered without a domain; using the local placeholder.\n' >&2
     return 0
   fi
   printf 'Free domain claimed: %s (pointed at your public IP).\n' "$domain" >&2
-  printf 'The name resolves, but inbound mail still needs TCP/25 and reverse DNS, so external email remains separate work.\n' >&2
+  verify_free_domain "$domain" "$ip"
+  printf 'A free name is not a mail server: inbound TCP/25 and reverse DNS remain separate work.\n' >&2
   printf '%s\n' "$domain"
 }
 

@@ -6,6 +6,7 @@ so the installer's rules can be tested on any machine.
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -137,6 +138,79 @@ class AutostartInstallerTests(unittest.TestCase):
         proc = subprocess.run(["bash", "-n", str(SCRIPT)], capture_output=True,
                               text=True, timeout=15)
         self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
+STUB_FREE_DOMAIN = '''\
+import json, os, sys
+if "--check" in sys.argv:
+    if os.environ.get("STUB_DNS") == "match":
+        print(json.dumps({"domain": "monico-abc123.duckdns.org", "match": True}))
+        raise SystemExit(0)
+    print("Monico free domain: monico-abc123.duckdns.org resolves to 1.1.1.1, not 8.8.8.8", file=sys.stderr)
+    raise SystemExit(1)
+print(json.dumps({"domain": "monico-abc123.duckdns.org", "ip": "8.8.8.8", "taken": []}))
+'''
+
+
+def shell_functions(*names):
+    """Extract named shell functions so the claim path can run without an install."""
+    text = SCRIPT.read_text(encoding="utf-8")
+    blocks = []
+    for name in names:
+        match = re.search(rf"^{name}\(\) \{{.*?^\}}$", text, re.S | re.M)
+        if match is None:
+            raise AssertionError(f"function {name} not found in {SCRIPT}")
+        blocks.append(match.group(0))
+    return "\n\n".join(blocks)
+
+
+class FreeDomainVerificationTests(unittest.TestCase):
+    """A claim verifies its own DNS record and warns instead of failing."""
+
+    def claim(self, dns):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        (root / "linux").mkdir()
+        (root / "linux" / "free_domain.py").write_text(STUB_FREE_DOMAIN, encoding="utf-8")
+        (root / "functions.sh").write_text(
+            shell_functions("verify_free_domain", "claim_free_domain"), encoding="utf-8"
+        )
+        harness = root / "harness.sh"
+        harness.write_text(
+            "set -euo pipefail\n"
+            'ROOT="$1"\n'
+            'PYTHON=python3\n'
+            'TOKEN_FILE="$ROOT/token"\n'
+            'PUBLIC_IP=""\n'
+            'DUCKDNS_TOKEN="12345678-1234-1234-1234-123456789abc"\n'
+            'die() { printf "%s\\n" "$1" >&2; exit 9; }\n'
+            'source "$ROOT/functions.sh"\n'
+            'claim_free_domain\n',
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            ["bash", str(harness), str(root)], capture_output=True, text=True,
+            timeout=30, env=dict(os.environ, STUB_DNS=dns),
+        )
+
+    def test_matching_dns_is_reported_after_the_claim(self):
+        proc = self.claim("match")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "monico-abc123.duckdns.org")
+        self.assertIn("Free domain claimed", proc.stderr)
+        self.assertIn("DNS verified", proc.stderr)
+        self.assertNotIn("WARNING", proc.stderr)
+
+    def test_mismatched_dns_warns_without_failing_the_install(self):
+        proc = self.claim("mismatch")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "monico-abc123.duckdns.org")
+        self.assertIn("WARNING", proc.stderr)
+        self.assertIn("does not match this host yet", proc.stderr)
+        self.assertIn("resolves to 1.1.1.1, not 8.8.8.8", proc.stderr)
+        self.assertIn("free_domain.py --check monico-abc123.duckdns.org --expect-ip 8.8.8.8", proc.stderr)
+        self.assertNotIn("12345678-1234", proc.stderr + proc.stdout)
 
 
 if __name__ == "__main__":
