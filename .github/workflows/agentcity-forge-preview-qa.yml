@@ -20,7 +20,7 @@ jobs:
       - name: Inspect Agent City Forge3D Cloudflare preview
         run: node scripts/verify-agent-city-forge-preview.mjs
         env:
-          PREVIEW_URL: https://97b19806.agents-city.pages.dev
+          PREVIEW_URL: https://feature-forge3d-world-remode.agents-city.pages.dev
       - name: Save browser screenshots and structured evidence
         if: always()
         uses: actions/upload-artifact@v4
