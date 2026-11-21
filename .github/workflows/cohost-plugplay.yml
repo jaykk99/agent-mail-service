@@ -111,3 +111,32 @@ jobs:
       - name: Cleanly stop both installed services
         if: always()
         run: bash linux/cohost.sh stop || true
+
+  one-line-main-bootstrap:
+    # Only main contains the finished public installer. Check the exact
+    # user-facing curl|bash command after merge, in a fresh runner.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Launch from a clean directory using the public installer
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL https://raw.githubusercontent.com/jaykk99/agent-mail-service/main/install.sh | bash
+          bash "$HOME/agent-mail-service/linux/cohost.sh" status
+          python3 - <<'PY'
+          import json, subprocess, urllib.request
+          status = json.loads(subprocess.check_output(
+              ["bash", "/home/runner/agent-mail-service/start.sh",
+               "--full", "status"], text=True))
+          assert status["phone_online_local"] and status["mcp_online_local"], status
+          with urllib.request.urlopen("http://127.0.0.1:8767/health", timeout=5) as resp:
+              assert json.load(resp)["service"] == "monico-bridge"
+          print("PASS: exact public one-line curl installer started all services")
+          PY
+      - name: Stop installed services
+        if: always()
+        run: |
+          if [ -f "$HOME/agent-mail-service/linux/cohost.sh" ]; then
+            bash "$HOME/agent-mail-service/linux/cohost.sh" stop || true
+          fi
