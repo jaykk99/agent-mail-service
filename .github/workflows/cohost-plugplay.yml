@@ -126,9 +126,10 @@ jobs:
           bash "$HOME/agent-mail-service/linux/cohost.sh" status
           python3 - <<'PY'
           import json, subprocess, urllib.request
+          from pathlib import Path
+          script = Path.home() / "agent-mail-service" / "start.sh"
           status = json.loads(subprocess.check_output(
-              ["bash", "/home/runner/agent-mail-service/start.sh",
-               "--full", "status"], text=True))
+              ["bash", str(script), "--full", "status"], text=True))
           assert status["phone_online_local"] and status["mcp_online_local"], status
           with urllib.request.urlopen("http://127.0.0.1:8767/health", timeout=5) as resp:
               assert json.load(resp)["service"] == "monico-bridge"
