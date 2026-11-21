@@ -268,7 +268,7 @@ ones get a 400, and another account's address answers 404.
 | GET | `/api/accounts` | every account with usage counts (master only) |
 | GET | `/api/dns` | MX/SPF/DKIM/DMARC records to publish (no auth) |
 | POST | `/api/inbound` | Worker delivery only: `{ to, from, subject, text, html, messageId?, date? }` -> `{ ok, stored, id?, duplicate? }` (Bearer inbound secret) |
-| POST | `/api/addresses` | `{ prefix }` -> `{ address }` (rate limited, prefix max 64 chars) |
+| POST | `/api/addresses` | `{ prefix }` -> `{ address }` (rate limited, prefix max 64 chars; the prefix is normalized — dots collapsed, edge dots/hyphens stripped — so the created address is always a valid, usable one) |
 | GET | `/api/addresses` | known addresses with inbox counts + created/last-seen |
 | POST | `/api/send` | `{ from, fromName?, to, subject, text, html? }` -> `{ messageId, provider }` (From must be an address this service created; sent via the SMTP relay or a Resend/Brevo API key) |
 | GET | `/api/relay` | outbound relay health incl. a live SMTP EHLO probe — no mail sent (master only; 200 usable, 503 unconfigured/probe failed) |

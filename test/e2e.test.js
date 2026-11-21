@@ -322,6 +322,23 @@ async function waitForHealth(child, timeoutMs = 15000) {
       assert.ok(!j.address.startsWith('@'), `address has empty local part: ${j.address}`);
     });
 
+    await test('dotted/edge-punctuation prefixes are normalized to a usable address', async () => {
+      const r = await fetch(`${BASE}/api/addresses`, { method: 'POST', headers, body: JSON.stringify({ prefix: '..dotty..name..' }) });
+      const j = await r.json();
+      assert.equal(r.status, 200);
+      assert.equal(j.address, `dotty.name@${DOMAIN}`);
+      // The normalized address is usable end to end: mail to it is stored
+      // and fetchable (before normalization it failed every inbox read).
+      await smtpSend({
+        to: j.address, from: 'verify@provider.example.com', subject: 'Hi dotty', body: 'hello',
+      });
+      await new Promise(r2 => setTimeout(r2, 500));
+      const list = await (await fetch(`${BASE}/api/inbox/${encodeURIComponent(j.address)}`, { headers })).json();
+      assert.equal(r.status, 200);
+      assert.equal(list.total, 1, JSON.stringify(list));
+      assert.equal(list.emails[0].subject, 'Hi dotty');
+    });
+
     // --- Outbound send via the fake relay ---
     await test('POST /api/send delivers through the relay from a created address', async () => {
       relayMail.length = 0;

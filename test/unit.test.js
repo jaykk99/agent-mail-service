@@ -13,6 +13,8 @@ const {
   extractAttachments,
   findVerifyLink,
   validAddressParam,
+  validLocalPart,
+  normalizeAddressPrefix,
   backoffMs,
   extractCodes,
   rankLinks,
@@ -168,6 +170,39 @@ test('validAddressParam rejects malformed input', () => {
   assert.equal(validAddressParam('a@b@c.com'), false);
   assert.equal(validAddressParam('x'.repeat(255) + '@d.com'), false);
   assert.equal(validAddressParam('bad chars@d.com'), false);
+});
+
+test('validAddressParam rejects dotted and hyphenated edges', () => {
+  assert.equal(validAddressParam('a..b@d.com'), false, 'consecutive dots in local part');
+  assert.equal(validAddressParam('.a@d.com'), false, 'leading dot in local part');
+  assert.equal(validAddressParam('a.@d.com'), false, 'trailing dot in local part');
+  assert.equal(validAddressParam('a@-d.com'), false, 'label starts with hyphen');
+  assert.equal(validAddressParam('a@d-.com'), false, 'label ends with hyphen');
+  assert.equal(validAddressParam('a@d.c'), false, 'one-letter TLD');
+  assert.equal(validAddressParam('a@d.12'), false, 'numeric TLD');
+  assert.equal(validAddressParam('x'.repeat(65) + '@d.com'), false, 'local part over 64');
+  assert.equal(validAddressParam('a@localhost'), false, 'single-label domain');
+  assert.equal(validAddressParam('a@d..com'), false, 'empty domain label');
+});
+
+test('validAddressParam accepts a 64-char local part', () => {
+  assert.equal(validAddressParam('x'.repeat(64) + '@d.com'), true);
+});
+
+test('validLocalPart matches the local-part half of validAddressParam', () => {
+  assert.equal(validLocalPart('a.b_c+d'), true);
+  assert.equal(validLocalPart('a..b'), false);
+  assert.equal(validLocalPart('.a'), false);
+  assert.equal(validLocalPart(''), false);
+});
+
+test('normalizeAddressPrefix collapses dots and trims edges', () => {
+  assert.equal(normalizeAddressPrefix('A..B'), 'a.b');
+  assert.equal(normalizeAddressPrefix('..a--'), 'a');
+  assert.equal(normalizeAddressPrefix('a_b-c.d+e'), 'a_b-c.de');
+  assert.equal(normalizeAddressPrefix('!!!'), '');
+  assert.equal(normalizeAddressPrefix('x'.repeat(70)), 'x'.repeat(64));
+  assert.equal(normalizeAddressPrefix(undefined), '');
 });
 
 test('backoffMs grows exponentially and stays capped', () => {

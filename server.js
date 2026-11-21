@@ -964,12 +964,48 @@ if (ADDRESS_TTL_HOURS > 0 && ADDRESS_SWEEP_MS > 0) {
   console.log('[ttl] address TTL sweep disabled');
 }
 
+// Local part of an address: 1-64 chars from the RFC-allowed set, no
+// leading/trailing dot, no consecutive dots. A prefix that violates any of
+// these used to be created anyway and then failed every later read (the
+// inbox routes validate the full address), so the address was unusable
+// from birth.
+function validLocalPart(local) {
+  return typeof local === 'string'
+    && local.length >= 1 && local.length <= 64
+    && /^[a-z0-9._%+-]+$/.test(local)
+    && !local.startsWith('.') && !local.endsWith('.') && !local.includes('..');
+}
+
 // Validate an address path parameter: local@domain shape, bounded length.
+// Domain: labels of 1-63 chars, no leading/trailing hyphen, TLD 2-63 alpha.
 function validAddressParam(addr) {
   if (typeof addr !== 'string' || addr.length === 0 || addr.length > 254) return false;
   const at = addr.indexOf('@');
   if (at <= 0 || at !== addr.lastIndexOf('@') || at === addr.length - 1) return false;
-  return /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(addr);
+  if (!validLocalPart(addr.slice(0, at))) return false;
+  const domain = addr.slice(at + 1);
+  if (domain.length > 253) return false;
+  const labels = domain.split('.');
+  if (labels.length < 2) return false;
+  for (const label of labels) {
+    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(label)) return false;
+  }
+  if (!/^[a-z]{2,63}$/.test(labels[labels.length - 1])) return false;
+  return true;
+}
+
+// Normalize a requested address prefix into a safe local part: lowercase,
+// drop characters outside the allowed set, collapse runs of dots, strip
+// leading/trailing dots and hyphens. Returns '' when nothing usable
+// remains (the caller falls back to a generated prefix).
+function normalizeAddressPrefix(prefix) {
+  return String(prefix || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, '')
+    .replace(/\.{2,}/g, '.')
+    .replace(/^[.-]+/, '')
+    .replace(/[.-]+$/, '')
+    .slice(0, 64);
 }
 
 // Normalize a Supabase row or in-memory object to the API email shape
@@ -1670,13 +1706,17 @@ app.post('/api/addresses', auth, addressRateLimit, async (req, res) => {
       res.setHeader('Retry-After', '3600');
       return res.status(429).json({ ok: false, error: 'Address creation rate limit exceeded. Try again later.' });
     }
-    let prefix = String(req.body.prefix || `agent${Date.now().toString(36)}`)
-      .toLowerCase()
-      .replace(/[^a-z0-9._-]/g, '')
-      .slice(0, 64);
+    let prefix = normalizeAddressPrefix(req.body.prefix);
     // Fall back to a generated prefix if the sanitized input is empty
     if (!prefix) prefix = `agent${Date.now().toString(36)}`;
     const address = `${prefix}@${DOMAIN}`;
+    // Defensive guard: normalization above guarantees a valid local part,
+    // so this only fires if the normalizer is ever changed. The domain is
+    // operator config, not user input, so only the local part is checked
+    // here — a single-label dev domain (localhost) must still create.
+    if (!validLocalPart(prefix)) {
+      return res.status(400).json({ ok: false, error: 'That prefix does not make a valid address' });
+    }
 
     const owner = await ownershipFor(address);
     if (typeof owner === 'string' && actor.role !== 'master' && owner !== actor.account.id) {
@@ -2201,6 +2241,8 @@ module.exports = {
   scoreLink,
   decodeEntities,
   validAddressParam,
+  validLocalPart,
+  normalizeAddressPrefix,
   backoffMs,
   sweepExpiredAddresses,
   validateSendBody,
