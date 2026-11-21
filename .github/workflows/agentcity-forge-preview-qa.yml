@@ -1,0 +1,30 @@
+name: Public Agent City Forge3D preview desktop/mobile QA
+on:
+  push:
+    branches: [qa/forge3d-architecture-external-20261121]
+    paths: ['scripts/verify-agent-city-forge-preview.mjs','.github/workflows/agentcity-forge-preview-qa.yml']
+  workflow_dispatch:
+jobs:
+  browser-preview:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: 22}
+      - name: Install public browser automation
+        run: npm install --no-save playwright@1.65.1
+      - name: Install headless Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Inspect Agent City Forge3D Cloudflare preview
+        run: node scripts/verify-agent-city-forge-preview.mjs
+        env:
+          PREVIEW_URL: https://97b19806.agents-city.pages.dev
+      - name: Save browser screenshots and structured evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-city-forge3d-preview-screenshots
+          path: forge3d-preview-qa/
+          if-no-files-found: ignore
