@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: jaykk99/linuxtomux
-          ref: fix/termux-discovery-usb-20261121
+          ref: main
           path: lin
       - uses: actions/setup-python@v5
         with:
