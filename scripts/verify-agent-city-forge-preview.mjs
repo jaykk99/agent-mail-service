@@ -66,6 +66,9 @@ for (const scenario of scenarios) {
       const memory = dialog.getByRole('region',{name:'Citizen memory'});
       await memory.waitFor({state:'visible',timeout:14000});
       observed.memoryOpen=true;
+      const memoryBounds = await memory.boundingBox();
+      const viewportHeight = page.viewportSize()?.height || 900;
+      observed.memoryNearTop = !!memoryBounds && memoryBounds.y >= 0 && memoryBounds.y < viewportHeight*0.72;
       observed.memorySummary=(await memory.innerText()).slice(0,300);
       await shot('resident-memory');
       await memory.getByRole('button',{name:'Show full memory'}).click();
@@ -78,7 +81,7 @@ for (const scenario of scenarios) {
       observed.phoneFits=viewport.left>=-2 && viewport.right<=viewport.viewport+2;
     }
     observed.passed=observed.status===200&&observed.canvas>0&&observed.entered&&
-      observed.phoneOpen&&observed.memoryOpen&&observed.memorySearch&&
+      observed.phoneOpen&&observed.memoryOpen&&observed.memoryNearTop&&observed.memorySearch&&
       observed.walletVisible&&observed.phoneFits&&errors.length===0;
     await context.close();
   }catch(e){
