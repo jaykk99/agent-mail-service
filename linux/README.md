@@ -147,6 +147,18 @@ inbound TCP/25, reverse DNS or a delegated mail domain, so receiving internet
 email on it still needs the separate mail deployment in
 [monico-mail-usb/DEPLOYMENT.md](../monico-mail-usb/DEPLOYMENT.md).
 
+To verify a claimed name later, compare its A record with your public address:
+
+~~~bash
+python3 linux/free_domain.py --check monico-abc123.duckdns.org
+~~~
+
+`--check` asks 8.8.8.8 and 1.1.1.1 directly, so a stale local cache cannot hide
+a record pointing elsewhere, then falls back to the system resolver. It exits
+non-zero when the name has no A record yet or resolves to a different address.
+Pass `--expect-ip` to compare against a known address instead of detecting the
+public one. This confirms DNS only: an A record is still not an MX or a PTR.
+
 The installer refuses a relative path, a `monico/linux-config.json` readable
 by other users, and `--public-ip` without `--allow-public`. It never re-runs
 USB discovery for the unit: the pinned directory is used, so a detached drive
