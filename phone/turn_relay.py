@@ -98,7 +98,8 @@ def main():
     p.add_argument("--port", type=int, default=3478)
     p.add_argument("--output", default=".generated/turnserver.conf")
     args = p.parse_args()
-    secret = os.environ.get("PHONE_TURN_SECRET", "")
+    import secrets
+    secret = os.environ.get("PHONE_TURN_SECRET", "") or secrets.token_urlsafe(36)
     try:
         contents = render_coturn(args.public_ip, secret, args.local_ip, args.port)
     except (ValueError, TypeError) as exc:
