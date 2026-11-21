@@ -17,6 +17,7 @@
  *   - address TTL auto-cleanup sweep on a short-TTL server
  *   - address-creation 429 + per-address SMTP receive rate limits
  *   - per-address quota reporting (GET /api/quota, GET /api/quota/:address)
+ *   - relay health with a live SMTP EHLO probe (GET /api/relay, master only)
  *   - (merged from origin) invalid address param 400, prefix truncation to 64
  *   - (merged from origin) inbox pagination via limit/offset
  *   - (merged from origin) verify-link long-poll /wait (immediate + timeout)
@@ -418,6 +419,21 @@ async function waitForHealth(child, timeoutMs = 15000) {
       const missing = await fetch(`${BASE}/api/quota/${encodeURIComponent('nobody@mail.example.test')}`, { headers });
       assert.equal(missing.status, 404);
       const anon = await fetch(`${BASE}/api/quota/${encodeURIComponent(address)}`);
+      assert.equal(anon.status, 401);
+    });
+
+    await test('GET /api/relay probes the fake relay live (master only)', async () => {
+      const r = await fetch(`${BASE}/api/relay`, { headers });
+      const j = await r.json();
+      assert.equal(r.status, 200, JSON.stringify(j));
+      assert.equal(j.ok, true);
+      assert.equal(j.provider, 'smtp');
+      assert.equal(j.configured, true);
+      assert.equal(j.probe, 'ok');
+      assert.match(j.detail, /answered EHLO/);
+      assert.equal(j.limits.sendPerHour, 100);
+      assert.equal(j.dkim, 'configured');
+      const anon = await fetch(`${BASE}/api/relay`);
       assert.equal(anon.status, 401);
     });
 

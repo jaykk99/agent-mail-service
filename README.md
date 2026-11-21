@@ -271,6 +271,7 @@ ones get a 400, and another account's address answers 404.
 | POST | `/api/addresses` | `{ prefix }` -> `{ address }` (rate limited, prefix max 64 chars) |
 | GET | `/api/addresses` | known addresses with inbox counts + created/last-seen |
 | POST | `/api/send` | `{ from, fromName?, to, subject, text, html? }` -> `{ messageId, provider }` (From must be an address this service created; sent via the SMTP relay or a Resend/Brevo API key) |
+| GET | `/api/relay` | outbound relay health incl. a live SMTP EHLO probe — no mail sent (master only; 200 usable, 503 unconfigured/probe failed) |
 | GET | `/api/inbox/:address` | paginated, searchable email list (see below) |
 | GET | `/api/inbox/:address/:id` | full email (subject, body, links, attachment metadata) |
 | GET | `/api/wait/:address?since=&from=&timeoutMs=` | **one call does it all**: waits for the next email and returns it in full with `code` (best one-time code), `link` (best action link), `email.codes`, `email.bestLinks` |
@@ -423,7 +424,9 @@ to send. Without it everything is in memory and lost on restart.
   per day (`SEND_MAX_PER_DAY`). Unconfigured outbound -> 503, provider 429 ->
   429 with `Retry-After`, other failures -> 502. Config is validated at boot
   and reported in `/health` as `outbound` / `outboundConfigured` (plus the
-  legacy `relay` status).
+  legacy `relay` status). `GET /api/relay` (master only) live-checks the
+  relay with an SMTP EHLO handshake — no mail is sent — and answers 200
+  when the outbound path is usable, 503 when it is not.
 
 ## Outbound through Brevo or Resend (free tiers)
 

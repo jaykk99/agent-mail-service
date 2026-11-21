@@ -10,6 +10,7 @@
  *   GET  /api/me                 -> calling account + usage (or master summary)
  *   GET  /api/quota              -> send/receive/creation quota usage (caller-scoped)
  *   GET  /api/quota/:address     -> quota usage for one address (send + receive buckets)
+ *   GET  /api/relay              -> outbound relay health incl. live SMTP EHLO probe (master only)
  *   GET  /api/accounts           -> every account with usage (master only)
  *   GET  /api/dns                -> MX/SPF/DKIM/DMARC records to publish
  *   POST /api/addresses          { prefix } -> { address }
@@ -240,6 +241,39 @@ function getSendTransport() {
 // Test hook: replace the live relay transport with a stub (or null to
 // restore lazy creation from env).
 function setSendTransport(t) { sendTransport = t || null; }
+
+// How long a relay probe may take before it is reported as a timeout.
+const RELAY_PROBE_TIMEOUT_MS = numEnv('RELAY_PROBE_TIMEOUT_MS', 10000);
+
+// Live-check the outbound path WITHOUT sending any mail. SMTP: nodemailer
+// transport.verify() opens the connection and runs EHLO, then closes it —
+// no message is ever sent. HTTP providers (Resend/Brevo) have no read-only
+// probe, so they report "not-probed" honestly instead of faking a check.
+// `transport` / `provider` / `configured` / `problems` are overridable so
+// unit tests can drive the probe without a real relay.
+async function probeRelay({ timeoutMs = RELAY_PROBE_TIMEOUT_MS, transport, provider = OUTBOUND_PROVIDER, configured = OUTBOUND_STATUS.configured, problems = OUTBOUND_STATUS.problems } = {}) {
+  const base = { provider, configured, problems };
+  if (provider !== 'smtp') {
+    return { ...base, probe: 'not-probed', detail: `no read-only probe for the ${provider} HTTP API` };
+  }
+  if (!configured) {
+    return { ...base, probe: 'skipped', detail: 'relay is not configured' };
+  }
+  const t = transport || getSendTransport();
+  if (!t || typeof t.verify !== 'function') {
+    return { ...base, probe: 'error', detail: 'no SMTP transport available' };
+  }
+  try {
+    const ok = await Promise.race([
+      t.verify(),
+      sleep(timeoutMs).then(() => { throw new Error(`relay probe timed out after ${timeoutMs}ms`); }),
+    ]);
+    if (!ok) return { ...base, probe: 'error', detail: 'relay rejected the connection (verify returned false)' };
+    return { ...base, probe: 'ok', detail: `SMTP relay ${SMTP_RELAY_HOST}:${SMTP_RELAY_PORT} answered EHLO` };
+  } catch (err) {
+    return { ...base, probe: 'error', detail: err.message };
+  }
+}
 
 // Build the provider-specific HTTP request. Pure, so the wire shape of both
 // providers is unit-testable without network access.
@@ -1805,6 +1839,26 @@ app.get('/api/quota/:address', auth, async (req, res) => {
   }
 });
 
+// Live relay health (master only): config status plus a real SMTP EHLO
+// probe against the relay — no mail is sent. 200 when the outbound path is
+// usable (or configured via an HTTP provider, which has no read-only
+// probe), 503 when the relay is unconfigured or the probe fails, so a
+// monitor can alert on the status code alone.
+app.get('/api/relay', auth, requireMaster, async (req, res) => {
+  try {
+    const result = await probeRelay();
+    const ok = result.configured && (result.probe === 'ok' || result.probe === 'not-probed');
+    res.status(ok ? 200 : 503).json({
+      ok,
+      ...result,
+      limits: { sendPerHour: SEND_MAX_PER_HOUR, sendPerDay: SEND_MAX_PER_DAY },
+      dkim: DKIM_STATUS.status,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Every account with usage — admin only. API keys are never returned, only
 // their prefixes so an operator can tell accounts apart.
 app.get('/api/accounts', auth, requireMaster, async (req, res) => {
@@ -2156,6 +2210,7 @@ module.exports = {
   sendAgentMail,
   getSendTransport,
   setSendTransport,
+  probeRelay,
   registerAddress,
   ownershipFor,
   canAccessAddress,

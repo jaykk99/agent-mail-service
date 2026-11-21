@@ -21,6 +21,7 @@ const {
   buildOutboundRequest,
   sendAgentMail,
   setSendTransport,
+  probeRelay,
   registerAddress,
   newApiKey,
   hashApiKey,
@@ -406,6 +407,49 @@ async function atest(name, fn) {
     assert.deepEqual(req.body.to, [{ email: 'human@example.com' }]);
     assert.equal(req.body.textContent, 'plain');
     assert.equal(req.body.htmlContent, '<b>rich</b>');
+  });
+
+  await atest('probeRelay reports skipped when the relay is unconfigured', async () => {
+    const r = await probeRelay({ provider: 'smtp', configured: false, problems: [] });
+    assert.equal(r.probe, 'skipped');
+    assert.equal(r.configured, false);
+  });
+
+  await atest('probeRelay verifies a healthy relay via stub transport', async () => {
+    const r = await probeRelay({
+      provider: 'smtp', configured: true, problems: [],
+      transport: { verify: async () => true },
+    });
+    assert.equal(r.probe, 'ok');
+    assert.match(r.detail, /answered EHLO/);
+  });
+
+  await atest('probeRelay reports errors and timeouts from the transport', async () => {
+    const refused = await probeRelay({
+      provider: 'smtp', configured: true, problems: [],
+      transport: { verify: async () => { throw new Error('connect ECONNREFUSED 127.0.0.1:587'); } },
+    });
+    assert.equal(refused.probe, 'error');
+    assert.match(refused.detail, /ECONNREFUSED/);
+    const hanging = await probeRelay({
+      provider: 'smtp', configured: true, problems: [],
+      transport: { verify: () => new Promise(() => {}) },
+      timeoutMs: 50,
+    });
+    assert.equal(hanging.probe, 'error');
+    assert.match(hanging.detail, /timed out after 50ms/);
+    const noVerify = await probeRelay({
+      provider: 'smtp', configured: true, problems: [],
+      transport: {},
+    });
+    assert.equal(noVerify.probe, 'error');
+    assert.match(noVerify.detail, /no SMTP transport available/);
+  });
+
+  await atest('probeRelay is honest about HTTP providers', async () => {
+    const r = await probeRelay({ provider: 'resend', configured: true, problems: [] });
+    assert.equal(r.probe, 'not-probed');
+    assert.match(r.detail, /no read-only probe/);
   });
 
   if (failures > 0) {
