@@ -134,6 +134,144 @@ PY
     fail "Lin-2-Mux did not become healthy. Inspect $BRIDGE_LOG."
 }
 
+# ADB reverse is optional, but it allows a paired Termux phone to
+# communicate and download its bridge installer entirely over the USB cable,
+# without WiFi, mobile data, router port forwarding, or an Android IP.
+ensure_adb() {
+    if command -v adb >/dev/null 2>&1; then return 0; fi
+    if [[ "${MONICO_SKIP_ADB_INSTALL:-0}" == "1" ]]; then return 1; fi
+    if ! command -v apt-get >/dev/null 2>&1; then
+        say "ADB not installed: local WiFi works; USB reverse needs Android platform-tools."
+        return 1
+    fi
+    local apt=(apt-get)
+    if [[ "$EUID" -ne 0 ]]; then
+        if ! command -v sudo >/dev/null 2>&1; then
+            say "ADB not installed: sudo is unavailable; local WiFi still works."
+            return 1
+        fi
+        apt=(sudo apt-get)
+    fi
+    say "Installing free Android platform tools (ADB) for offline USB pairing."
+    if "${apt[@]}" update && "${apt[@]}" install -y adb; then
+        return 0
+    fi
+    say "ADB could not be installed. Local WiFi pairing still works."
+    return 1
+}
+
+enable_usb_reverse() {
+    command -v adb >/dev/null 2>&1 || return 1
+    # Never claim USB pairing unless the physical phone is attached AND
+    # the user accepted Android's trust/USB-debugging authorization prompt.
+    local status
+    status="$(adb devices 2>/dev/null || true)"
+    if grep -qE '^[[:alnum:]_.:-]+[[:space:]]+device
+    say "Both services started locally on this Linux machine:"
+    say "  Agent Mail dashboard: http://127.0.0.1:8765"
+    say "  Agent Mail MCP:       http://127.0.0.1:8787/mcp"
+    say "  Lin-2-Mux dashboard:  http://127.0.0.1:8767/dashboard"
+    say ""
+    local usb_ready=0
+    if enable_usb_reverse; then usb_ready=1; fi
+    say "Pair your Android Termux phone with the fresh 4-digit code below."
+    "$HOME/.local/bin/monico-pair"
+    if (( usb_ready )); then
+        say "Android USB bridge: CONNECTED and authorized, no Android internet needed."
+        say "Run monico-connect on Termux and enter the displayed code."
+        say "If Termux is not installed yet, copy/paste this one line on Termux:"
+        say "  curl -fsSL http://127.0.0.1:$BRIDGE_PORT/install-termux.sh | bash -s -- http://127.0.0.1:$BRIDGE_PORT"
+        say "It downloads everything from Linux itself. Termux needs bash, curl, Python installed once."
+    fi
+    local ip
+    ip="$(python3 - <<'PY'
+import socket
+try:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(("1.1.1.1", 80))
+        print(s.getsockname()[0])
+except OSError:
+    pass
+PY
+)"
+    if [[ -n "$ip" ]]; then
+        say "If Termux cannot find Linux automatically, paste this into Termux:"
+        say "  monico-connect --server http://$ip:$BRIDGE_PORT"
+        say "It will ask for the same four-digit code. No script edits needed."
+    fi
+    if [[ -d /mnt/chromeos ]]; then
+        say "Chromebook Linux note: its container IP may not be reachable from Android."
+        say "Use an authorized ADB reverse tunnel or an explicitly enabled HTTPS tunnel."
+    fi
+    if command -v adb >/dev/null 2>&1 && adb devices 2>/dev/null | grep -qE 'device$'; then
+        if adb reverse tcp:$BRIDGE_PORT tcp:$BRIDGE_PORT >/dev/null 2>&1; then
+            say "ADB USB tunnel enabled. From Termux use:"
+            say "  monico-connect --server http://127.0.0.1:$BRIDGE_PORT"
+        fi
+    fi
+    say ""
+    say "Once paired, run monico-usb on Termux or Linux to see drives attached to Linux."
+    say "To give proxy-aware Termux tools Linux's internet, run: monico-net on"
+    say "For local WiFi with no phone internet, use the Linux address above."
+    say "For USB-only pairing, connect a cable, enable USB debugging once and authorize this Linux computer."
+    say "If ADB wasn't ready at startup, re-run the SAME installer after authorization."
+    "$HOME/.local/bin/monico-usb" || true
+    say "To check later: bash $ROOT/linux/cohost.sh status"
+    say "Public Internet email still needs real DNS, reachable SMTP and external tests."
+}
+
+case "$ACTION" in
+    up|install)
+        ensure_runtime
+        say "Starting Agent Mail (auto-detecting safe USB storage)."
+        if [[ -x "$ROOT/monico-mail-usb/.venv/bin/python" ]] &&
+           "$ROOT/monico-mail-usb/.venv/bin/python" -c 'import fastmcp, pydantic' >/dev/null 2>&1; then
+            bash "$ROOT/start.sh" --full up
+        else
+            # Existing installer installs system Python packages and MCP dependencies.
+            # If Python/venv are already installed, avoid sudo and apt refresh.
+            bash "$ROOT/start.sh" --full up --install || {
+                say "Retrying with distro package prerequisites." >&2
+                bash "$ROOT/linux/install.sh"
+            }
+        fi
+        checkout_bridge
+        bash "$BRIDGE_DIR/install-linux.sh"
+        start_bridge
+        bridge_health || fail "Lin-2-Mux health endpoint is unavailable."
+        ensure_adb || true
+        print_device_help
+        ;;
+    status|doctor)
+        bash "$ROOT/start.sh" --full "$ACTION"
+        if bridge_health; then
+            say "Lin-2-Mux: reachable at http://127.0.0.1:$BRIDGE_PORT"
+            "$HOME/.local/bin/monico-usb" || true
+        else
+            fail "Lin-2-Mux is not running at port $BRIDGE_PORT."
+        fi
+        ;;
+    stop)
+        stop_bridge
+        bash "$ROOT/start.sh" --full stop
+        ;;
+    *)
+        say "Usage: bash install.sh   (install and start both)"
+        say "       bash linux/cohost.sh [up|status|doctor|stop]"
+        exit 2
+        ;;
+esac
+ <<<"$status"; then
+        if adb reverse "tcp:$BRIDGE_PORT" "tcp:$BRIDGE_PORT" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+    if grep -q 'unauthorized' <<<"$status"; then
+        say "Android USB is detected but not authorized. Accept the USB debugging prompt on the phone."
+    fi
+    return 1
+}
+
 print_device_help() {
     say ""
     say "Both services started locally on this Linux machine:"
