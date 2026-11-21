@@ -26,11 +26,15 @@ class DomainSetupTests(unittest.TestCase):
                 write_domain_config("new-domain.net", conf, root / "agents.sqlite3")
             self.assertFalse(conf.exists())
 
-    def test_reject_fake_domain(self):
+    def test_accept_free_and_local_domains(self):
         with tempfile.TemporaryDirectory() as tmp:
-            for domain in ("mail.example.invalid", "example.com", "name.test"):
-                with self.subTest(domain=domain), self.assertRaises(ValueError):
-                    write_domain_config(domain, Path(tmp) / "domain.env")
+            for domain in ("agents.local", "home.lan", "localhost"):
+                with self.subTest(domain=domain):
+                    out = Path(tmp) / f"{domain}.env"
+                    write_domain_config(domain, out)
+                    self.assertIn(f"MONICO_DOMAIN={domain}", out.read_text())
+            with self.assertRaises(ValueError):
+                write_domain_config("bad..domain", Path(tmp) / "bad.env")
 
     def test_no_database_created_for_new_install(self):
         with tempfile.TemporaryDirectory() as tmp:

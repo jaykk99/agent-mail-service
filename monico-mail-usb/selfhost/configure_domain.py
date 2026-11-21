@@ -69,7 +69,7 @@ def write_domain_config(domain, output_file, db_path=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--domain", required=True, help="Public domain/subdomain you control")
+    parser.add_argument("--domain", default="agents.local", help="Free local or custom domain (default: agents.local)")
     parser.add_argument("--data", help="Existing Monico USB directory, to prevent domain changes")
     parser.add_argument("--output", default="~/.config/monico-mail/domain.env",
                         help="Private shell config location")

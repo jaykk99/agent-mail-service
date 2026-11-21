@@ -90,7 +90,7 @@ def load_config(state, domain=None, create=False):
         return config, mail
     if not create:
         return None, mail
-    domain = (domain or "mail.example.invalid").lower().strip()
+    domain = (domain or "agents.local").lower().strip()
     if not DOMAIN_PATTERN.fullmatch(domain) or ".." in domain:
         raise ValueError("Invalid email domain")
     config = {

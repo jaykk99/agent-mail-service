@@ -1,16 +1,10 @@
 #!/bin/sh
-# Single command on Linux: discover USB, start all LOCAL routes and MCP-ready server.
-# Keeps running after this terminal closes; no cloud or pip/npm required.
+# Single plug-and-play command on Linux:
+# Starts the self-hosted 1,000-email & 1,000-phone-extension server on port 3000
+# and built-in SMTP listener on port 2525 with ZERO API keys or required domains.
 set -eu
 cd "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "Python 3 is required (usually preinstalled on Chromebook Linux)." >&2
-  exit 1
-fi
-# Opt in to BOTH services: phone/dashboard + separate named-mail MCP.
-# This leaves existing phone-only 'bash start.sh' behavior unchanged.
-# Public HTTPS for Monico's browser/internal-agent service (explicit opt-in).
-# Not a public SMTP/IMAP relay or cellular carrier phone service.
+
 if [ "${1-}" = "--public" ]; then
   shift
   exec python3 linux/public_manage.py "$@"
@@ -18,6 +12,24 @@ fi
 if [ "${1-}" = "--full" ]; then
   shift
   exec python3 linux/manage.py "$@"
+fi
+if [ "${1-}" = "--python" ]; then
+  shift
+  exec python3 phone/start.py "$@"
+fi
+
+if [ "$#" -eq 0 ] && command -v node >/dev/null 2>&1; then
+  if [ ! -d node_modules ] && command -v npm >/dev/null 2>&1; then
+    echo "Installing Node dependencies once..."
+    npm install --no-audit --no-fund
+  fi
+  echo "Starting plug-and-play 1,000-agent Mail & Phone server on http://0.0.0.0:3000 (SMTP :2525)..."
+  exec node server.js
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Node.js or Python 3 is required." >&2
+  exit 1
 fi
 if [ "$#" -eq 0 ]; then
   exec python3 phone/start.py --daemon

@@ -54,10 +54,10 @@ def save_storage_config(data_dir, output):
     return target
 
 
-def setup(domain, usb_name=None, data_path=None, config_dir=CONFIG_DIR, removable=REMOVABLE):
-    """Ensure an existing shared USB exists and configure a chosen domain."""
-    if (usb_name is None) == (data_path is None):
-        raise ValueError("Provide exactly one of --usb or --data")
+def setup(domain="agents.local", usb_name=None, data_path=None, config_dir=CONFIG_DIR, removable=REMOVABLE):
+    """Ensure storage exists and configure a free/local or custom domain."""
+    if usb_name is not None and data_path is not None:
+        raise ValueError("Provide at most one of --usb or --data")
     if usb_name is not None:
         if (not usb_name or usb_name in (".", "..") or "/" in usb_name
                 or "\\" in usb_name or "\x00" in usb_name):
@@ -68,29 +68,30 @@ def setup(domain, usb_name=None, data_path=None, config_dir=CONFIG_DIR, removabl
         data = drive / "monico"
         data.mkdir(parents=True, exist_ok=True)
     else:
-        data = Path(data_path).expanduser().resolve(strict=True)
+        default_data = Path(data_path or (Path.home() / "agent-mail-data")).expanduser()
+        default_data.mkdir(parents=True, exist_ok=True, mode=0o700)
+        data = default_data.resolve(strict=True)
         if not data.is_dir():
             raise ValueError("Data path must be a directory")
     config_dir = Path(config_dir).expanduser()
     config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-    # Check for an existing DB tied to a different domain before changing config.
     domain_file = config_dir / "domain.env"
     storage_file = config_dir / "storage.env"
     write_domain_config(domain, domain_file, data / "agents.sqlite3")
     save_storage_config(data, storage_file)
-    return {"domain": domain.strip().lower(), "data": str(data.resolve()),
+    return {"domain": (domain or "agents.local").strip().lower(), "data": str(data.resolve()),
             "domain_file": str(domain_file), "storage_file": str(storage_file),
             "public_domain_verified": False}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--domain", required=True,
-                        help="Public domain/subdomain already delegated to you")
-    location = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument("--domain", default="agents.local",
+                        help="Free local or custom domain (default: agents.local)")
+    location = parser.add_mutually_exclusive_group(required=False)
     location.add_argument("--usb", help="Drive name shown by ls /mnt/chromeos/removable")
-    location.add_argument("--data", help="Existing USB-mounted directory")
+    location.add_argument("--data", help="Existing directory (defaults to ~/agent-mail-data)")
     args = parser.parse_args()
     try:
         result = setup(args.domain, args.usb, args.data)

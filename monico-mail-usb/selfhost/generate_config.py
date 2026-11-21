@@ -10,15 +10,15 @@ import os
 from pathlib import Path
 import re
 
-DOMAIN_PATTERN = re.compile(r"(?=.{4,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\Z")
-RESERVED = (".invalid", ".example", ".test", ".localhost")
+DOMAIN_PATTERN = re.compile(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 
 
 def check_domain(domain):
-    domain = domain.strip().lower()
-    if (not DOMAIN_PATTERN.fullmatch(domain) or domain.endswith(RESERVED)
-            or domain in ("example.com", "example.net", "example.org")):
-        raise ValueError("A real delegated public mail domain is required")
+    domain = str(domain or "agents.local").strip().lower().lstrip("@")
+    if not domain:
+        return "agents.local"
+    if not DOMAIN_PATTERN.fullmatch(domain) or ".." in domain:
+        raise ValueError("Invalid domain format (use letters, numbers, dots, hyphens)")
     return domain
 
 
