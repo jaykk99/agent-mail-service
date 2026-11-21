@@ -88,6 +88,16 @@ def public_ipv4(get=None):
     return str(address)
 
 
+def _global_ipv4(value, option):
+    try:
+        address = ipaddress.ip_address(str(value))
+    except ValueError as exc:
+        raise DomainError(f"{option} must be a plain IPv4 address") from exc
+    if address.version != 4 or not address.is_global:
+        raise DomainError(f"{option} must be a globally routable IPv4 address")
+    return address
+
+
 def claim(token, ip=None, prefix="monico", attempts=5, get=None):
     """Claim the first DuckDNS name that is not already taken.
 
@@ -100,12 +110,7 @@ def claim(token, ip=None, prefix="monico", attempts=5, get=None):
         raise DomainError("attempts must be between 1 and 20")
     if ip is None:
         ip = public_ipv4(get)
-    try:
-        address = ipaddress.ip_address(str(ip))
-    except ValueError as exc:
-        raise DomainError("--ip must be a plain IPv4 address") from exc
-    if address.version != 4 or not address.is_global:
-        raise DomainError("--ip must be a globally routable IPv4 address")
+    address = _global_ipv4(ip, "--ip")
     tried = []
     for _ in range(attempts):
         name = candidate(prefix)
@@ -233,12 +238,7 @@ def check(domain, expect_ip=None, resolve=None, get=None):
     name = normalise_domain(domain)
     resolve = resolve or resolve_a
     expected = expect_ip if expect_ip is not None else public_ipv4(get)
-    try:
-        address = ipaddress.ip_address(str(expected))
-    except ValueError as exc:
-        raise DomainError("--expect-ip must be a plain IPv4 address") from exc
-    if address.version != 4 or not address.is_global:
-        raise DomainError("--expect-ip must be a globally routable IPv4 address")
+    address = _global_ipv4(expected, "--expect-ip")
     addresses = list(resolve(name))
     if not addresses:
         raise DomainError(f"no A record for {name} yet; retry in a minute")

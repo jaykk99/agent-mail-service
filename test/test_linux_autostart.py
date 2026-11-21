@@ -174,7 +174,7 @@ class FreeDomainVerificationTests(unittest.TestCase):
         (root / "linux").mkdir()
         (root / "linux" / "free_domain.py").write_text(STUB_FREE_DOMAIN, encoding="utf-8")
         (root / "functions.sh").write_text(
-            shell_functions("verify_free_domain", "claim_free_domain"), encoding="utf-8"
+            shell_functions("verify_domain", "claim_free_domain"), encoding="utf-8"
         )
         harness = root / "harness.sh"
         harness.write_text(
@@ -207,10 +207,64 @@ class FreeDomainVerificationTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), "monico-abc123.duckdns.org")
         self.assertIn("WARNING", proc.stderr)
-        self.assertIn("does not match this host yet", proc.stderr)
+        self.assertIn("does not point at this host yet", proc.stderr)
         self.assertIn("resolves to 1.1.1.1, not 8.8.8.8", proc.stderr)
         self.assertIn("free_domain.py --check monico-abc123.duckdns.org --expect-ip 8.8.8.8", proc.stderr)
         self.assertNotIn("12345678-1234", proc.stderr + proc.stdout)
+
+
+STATUS_HARNESS = '''\
+set -euo pipefail
+ROOT="$1"
+STATE_DIR="$2"
+UNIT_DIR="$ROOT/xdg/systemd/user"
+UNIT_NAME=monico-agent.service
+PYTHON=python3
+have_user_systemd() { return 1; }
+linger_state() { echo unknown; }
+source "$ROOT/functions.sh"
+show_status
+'''
+
+
+class StatusDomainCheckTests(unittest.TestCase):
+    """--status re-checks the pinned domain without claiming anything."""
+
+    def status(self, domain, dns="match"):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        (root / "linux").mkdir()
+        (root / "linux" / "free_domain.py").write_text(STUB_FREE_DOMAIN, encoding="utf-8")
+        state = root / "state"
+        (state / "monico").mkdir(parents=True)
+        (state / "monico" / "linux-config.json").write_text(json.dumps({"domain": domain}))
+        (root / "functions.sh").write_text(
+            shell_functions("verify_domain", "saved_domain", "show_status"), encoding="utf-8"
+        )
+        (root / "status.sh").write_text(STATUS_HARNESS, encoding="utf-8")
+        return subprocess.run(
+            ["bash", str(root / "status.sh"), str(root), str(state)],
+            capture_output=True, text=True, timeout=30, env=dict(os.environ, STUB_DNS=dns),
+        )
+
+    def test_status_verifies_the_pinned_domain(self):
+        proc = self.status("monico-abc123.duckdns.org")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("domain: monico-abc123.duckdns.org", proc.stdout)
+        self.assertIn("DNS verified", proc.stderr)
+
+    def test_status_warns_when_the_pinned_domain_moved(self):
+        proc = self.status("monico-abc123.duckdns.org", dns="mismatch")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("WARNING", proc.stderr)
+        self.assertIn("does not point at this host yet", proc.stderr)
+
+    def test_status_skips_the_local_placeholder_domain(self):
+        proc = self.status("mail.example.invalid")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("domain check: skipped (local placeholder domain)", proc.stdout)
+        self.assertNotIn("DNS verified", proc.stderr)
 
 
 if __name__ == "__main__":

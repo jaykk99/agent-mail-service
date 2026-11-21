@@ -153,6 +153,20 @@ except (OSError, ValueError, KeyError, TypeError):
 PY
 }
 
+# Print the mailbox domain pinned in a state directory, or nothing.
+saved_domain() {
+  local config="$1"
+  [[ -f "$config" ]] || return 0
+  "$PYTHON" - "$config" <<'PY' 2>/dev/null || true
+import json
+import sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8"))["domain"])
+except (OSError, ValueError, KeyError, TypeError):
+    pass
+PY
+}
+
 venv_ok() {
   "$PYTHON" -c 'import venv, ensurepip' >/dev/null 2>&1
 }
@@ -170,8 +184,8 @@ normalise_domain() {
   printf '%s\n' "$domain"
 }
 
-# Confirm a freshly claimed name points here; propagation lag is a warning.
-verify_free_domain() {
+# Confirm a pinned or freshly claimed name resolves here; lag is a warning.
+verify_domain() {
   local domain="$1" expect="${2:-}" detail
   local args=(--check "$domain")
   [[ -n "$expect" ]] && args+=(--expect-ip "$expect")
@@ -179,11 +193,8 @@ verify_free_domain() {
     printf 'DNS verified: %s resolves to %s.\n' "$domain" "${expect:-your public IP}" >&2
     return 0
   fi
-  printf 'WARNING: %s is claimed, but DNS does not match this host yet.\n' "$domain" >&2
-  printf '  %s\n' "$detail" >&2
-  printf '  DuckDNS usually publishes within 60 seconds; re-check with:\n' >&2
-  printf '  python3 %s --check %s%s\n' "$ROOT/linux/free_domain.py" "$domain" "${expect:+ --expect-ip $expect}" >&2
-  printf '  Until then the name points somewhere other than this machine.\n' >&2
+  printf 'WARNING: %s does not point at this host yet.\n  %s\n  DNS may take up to a minute to publish; re-check:\n  python3 %s --check %s%s\n' \
+    "$domain" "$detail" "$ROOT/linux/free_domain.py" "$domain" "${expect:+ --expect-ip $expect}" >&2
 }
 
 # Claim a free DuckDNS name; prints the domain, or nothing when it cannot.
@@ -206,23 +217,22 @@ claim_free_domain() {
     printf '%s\n' "$token" >"$TOKEN_FILE"
     chmod 600 "$TOKEN_FILE"
   fi
-  local args=(--prefix monico) output domain ip
+  local args=(--prefix monico) output claimed domain ip
   [[ -n "$PUBLIC_IP" ]] && args+=(--ip "$PUBLIC_IP")
   if ! output="$(DUCKDNS_TOKEN="$token" "$PYTHON" "$ROOT/linux/free_domain.py" "${args[@]}" 2>&1)"; then
     printf 'Monico autostart: free domain not claimed: %s\n' "$output" >&2
     printf 'Continuing with the local-only placeholder domain.\n' >&2
     return 0
   fi
-  domain="$(printf '%s' "$output" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["domain"])' 2>/dev/null)" \
-    || domain=""
-  ip="$(printf '%s' "$output" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["ip"])' 2>/dev/null)" \
-    || ip=""
+  claimed="$(printf '%s' "$output" | "$PYTHON" -c 'import json,sys; d=json.load(sys.stdin); print(d["domain"], d["ip"])' 2>/dev/null)" \
+    || claimed=""
+  read -r domain ip <<<"$claimed" || true
   if [[ -z "$domain" ]]; then
     printf 'Monico autostart: DuckDNS answered without a domain; using the local placeholder.\n' >&2
     return 0
   fi
   printf 'Free domain claimed: %s (pointed at your public IP).\n' "$domain" >&2
-  verify_free_domain "$domain" "$ip"
+  verify_domain "$domain" "$ip"
   printf 'A free name is not a mail server: inbound TCP/25 and reverse DNS remain separate work.\n' >&2
   printf '%s\n' "$domain"
 }
@@ -231,12 +241,7 @@ claim_free_domain() {
 choose_domain() {
   local state="$1" existing="" choice="" typed=""
   if [[ -n "$state" && -f "$state/monico/linux-config.json" ]]; then
-    existing="$("$PYTHON" - "$state/monico/linux-config.json" <<'PY'
-import json
-import sys
-print(json.load(open(sys.argv[1], encoding="utf-8"))["domain"])
-PY
-)" || existing=""
+    existing="$(saved_domain "$state/monico/linux-config.json")"
     if [[ -n "$DOMAIN" && "$DOMAIN" != "$existing" ]]; then
       die "this storage already uses $existing; changing the domain is blocked to protect agent addresses"
     fi
@@ -433,7 +438,7 @@ install_all() {
 }
 
 show_status() {
-  local target="$UNIT_DIR/$UNIT_NAME"
+  local target="$UNIT_DIR/$UNIT_NAME" state="$STATE_DIR" domain=""
   if [[ -f "$target" ]]; then
     echo "unit file: $target"
   else
@@ -447,6 +452,15 @@ show_status() {
     echo "active: unknown (systemctl --user unavailable in this session)"
   fi
   echo "linger: $(linger_state)"
+  [[ -n "$state" ]] || state="$(saved_storage || true)"
+  domain="$(saved_domain "$state/monico/linux-config.json")"
+  if [[ -n "$domain" ]]; then
+    echo "domain: $domain"
+    case "$domain" in
+      *.invalid) echo "domain check: skipped (local placeholder domain)" ;;
+      *) verify_domain "$domain" ;;
+    esac
+  fi
   echo "Local services themselves: bash start.sh --full status"
 }
 

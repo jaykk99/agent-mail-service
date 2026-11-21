@@ -149,7 +149,9 @@ email on it still needs the separate mail deployment in
 
 The installer verifies a freshly claimed name straight away. When its A record
 does not point at this host yet, that is a warning printed with the failing
-address and the exact re-check command, not a failed installation.
+address and the exact re-check command, not a failed installation. Running
+`bash linux/enable_autostart.sh --status` prints the pinned domain and repeats
+that check, so it can be re-run at any time without claiming a new name.
 
 To verify a claimed name later, compare its A record with your public address:
 
