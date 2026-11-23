@@ -1,0 +1,22 @@
+name: Docker transitive module closure
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - server.js
+      - 'lib/**'
+      - 'test/docker-relative-import-closure.js'
+      - '.github/workflows/docker-module-closure.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  module-closure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build -t agent-mail-module-closure .
+      - name: Verify all packaged relative imports, including lib dependencies
+        run: docker run --rm -i --entrypoint node agent-mail-module-closure - < test/docker-relative-import-closure.js
