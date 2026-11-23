@@ -31,7 +31,8 @@ app.use(express.json({ limit: '2mb' }));
 
 const PORT = Number(process.env.PORT) || 3000;
 const SMTP_PORT = Number(process.env.SMTP_PORT) || 2525;
-const SMTP_HOST = process.env.SMTP_HOST || '0.0.0.0';
+const SMTP_HOST = process.env.SMTP_HOST || '127.0.0.1';
+const HTTP_HOST = process.env.HTTP_HOST || '127.0.0.1';
 const SMTP_ENABLED = String(process.env.SMTP_ENABLED ?? '1') !== '0';
 const SMTP_ACCEPT_ANY_DOMAIN = String(process.env.SMTP_ACCEPT_ANY_DOMAIN ?? '1') !== '0';
 const AGENT_COUNT = Math.min(1000, Math.max(1, Number(process.env.AGENT_COUNT) || 1000));
@@ -1503,8 +1504,8 @@ if (require.main === module) {
       console.log(`[smtp] built-in SMTP listening on ${SMTP_HOST}:${SMTP_PORT}`);
     });
   }
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[ready] Self-hosted Linux Agent Mail & Phone listening on http://0.0.0.0:${PORT}`);
+  app.listen(PORT, HTTP_HOST, () => {
+    console.log(`[ready] Self-hosted Linux Agent Mail & Phone listening on http://${HTTP_HOST}:${PORT}`);
     console.log(`[ready] ${agents.size} free mailboxes (agent-0001@${activeDomain}..agent-${String(agents.size).padStart(4, '0')}@${activeDomain}) & extensions (${BASE_EXTENSION}-${BASE_EXTENSION + agents.size - 1}) ready — ZERO API keys!`);
   });
 }

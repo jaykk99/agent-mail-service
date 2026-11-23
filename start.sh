@@ -23,7 +23,7 @@ if [ "$#" -eq 0 ] && command -v node >/dev/null 2>&1; then
     echo "Installing Node dependencies once..."
     npm install --no-audit --no-fund
   fi
-  echo "Starting plug-and-play 1,000-agent Mail & Phone server on http://0.0.0.0:3000 (SMTP :2525)..."
+  echo "Starting legacy Mail & Phone on http://${HTTP_HOST:-127.0.0.1}:${PORT:-3000} (SMTP ${SMTP_HOST:-127.0.0.1}:${SMTP_PORT:-2525})..."
   exec node server.js
 fi
 
