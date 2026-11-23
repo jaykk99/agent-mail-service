@@ -16,6 +16,31 @@ jobs:
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
+      - name: Reject high-severity production dependency advisories
+        run: |
+          npm audit --omit=dev --audit-level=high --json > audit-report.json || echo 'npm audit reported findings; evaluating JSON'
+          node <<'NODE'
+          const fs = require('node:fs');
+          const report = JSON.parse(fs.readFileSync('audit-report.json', 'utf8'));
+          if (report.error) {
+            console.error('npm audit failed:', report.error.message || report.error);
+            process.exit(1);
+          }
+          const findings = Object.entries(report.vulnerabilities || {})
+            .filter(([, entry]) => ['high', 'critical'].includes(entry.severity));
+          for (const [name, entry] of findings) {
+            console.error('SECURITY:', name, entry.severity, JSON.stringify(entry.via), 'fixAvailable=', JSON.stringify(entry.fixAvailable));
+          }
+          if (findings.length || (report.metadata?.vulnerabilities?.high || 0) || (report.metadata?.vulnerabilities?.critical || 0)) {
+            console.error('FAIL: high/critical production dependency advisories');
+            process.exit(1);
+          }
+          if (process.env.AUDIT_EXIT_STATUS && process.env.AUDIT_EXIT_STATUS !== '0') {
+            console.error('FAIL: npm audit exited', process.env.AUDIT_EXIT_STATUS);
+            process.exit(1);
+          }
+          console.log('PASS: no high/critical production dependency advisories');
+          NODE
       - name: Overlay reviewed loopback Compose from PR 15
         run: |
           git fetch --no-tags origin 5709b485e3b175c9bae8cbfbd05cd797d83b41ef
