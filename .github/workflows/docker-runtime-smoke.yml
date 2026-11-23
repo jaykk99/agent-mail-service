@@ -24,6 +24,23 @@ jobs:
       - name: Resolve and load required module inside image
         run: docker run --rm --entrypoint node agent-mail-smoke -e "require('./lib/linux-configs'); console.log('Linux configs module loaded')"
 
+      - name: Verify packaged relative imports resolve inside image
+        run: |
+          docker run --rm --entrypoint node agent-mail-smoke - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const assert = require('node:assert/strict');
+          const source = fs.readFileSync('/app/server.js', 'utf8');
+          const imports = [...source.matchAll(/require\(['"]([.][^'"]+)['"]\)/g)]
+            .map(match => match[1]);
+          assert.ok(imports.length > 0, 'expected at least one relative import');
+          for (const imported of imports) {
+            const resolved = require.resolve(path.resolve('/app', imported));
+            assert.ok(fs.existsSync(resolved), `missing packaged import: ${imported}`);
+          }
+          console.log(`Verified ${imports.length} packaged relative imports`);
+          NODE
+
       - name: Start isolated container and probe HTTP plus SMTP listeners
         shell: bash
         run: |
