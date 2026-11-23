@@ -32,7 +32,7 @@ jobs:
             -e DATA_DIR=:memory: -e AGENT_COUNT=2 -e DIRECT_MX_OUTBOUND=0 \
             agent-mail-smoke
           trap 'docker logs agent-mail-runtime-smoke || true; docker rm -f agent-mail-runtime-smoke >/dev/null 2>&1 || true' EXIT
-          docker exec -i agent-mail-runtime-smoke node - <<'NODE'
+          # The runtime smoke must not accidentally publish host ports.\n          # Compose host binding is validated separately in PR #15.\n          test "$(docker inspect agent-mail-runtime-smoke --format '{{json .HostConfig.PortBindings}}')" = 'null'\n          test "$(docker inspect agent-mail-runtime-smoke --format '{{.HostConfig.NetworkMode}}')" = 'none'\n          docker exec -i agent-mail-runtime-smoke node - <<'NODE'
           const net = require('node:net');
           const assert = require('node:assert/strict');
           const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
