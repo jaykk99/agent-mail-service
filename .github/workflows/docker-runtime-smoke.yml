@@ -23,3 +23,45 @@ jobs:
       - run: docker build -t agent-mail-smoke .
       - name: Resolve and load required module inside image
         run: docker run --rm --entrypoint node agent-mail-smoke -e "require('./lib/linux-configs'); console.log('Linux configs module loaded')"
+
+      - name: Start isolated container and probe HTTP plus SMTP listeners
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name agent-mail-runtime-smoke --network none \
+            -e DATA_DIR=:memory: -e AGENT_COUNT=2 -e DIRECT_MX_OUTBOUND=0 \
+            agent-mail-smoke
+          trap 'docker logs agent-mail-runtime-smoke || true; docker rm -f agent-mail-runtime-smoke >/dev/null 2>&1 || true' EXIT
+          docker exec -i agent-mail-runtime-smoke node - <<'NODE'
+          const net = require('node:net');
+          const assert = require('node:assert/strict');
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          async function smtpReady() {
+            return new Promise(resolve => {
+              const socket = net.connect({ host: '127.0.0.1', port: 2525 });
+              socket.setTimeout(1000);
+              socket.once('data', chunk => {
+                resolve(/^220[ -]/.test(chunk.toString()));
+                socket.destroy();
+              });
+              socket.once('error', () => resolve(false));
+              socket.once('timeout', () => { resolve(false); socket.destroy(); });
+            });
+          }
+          (async () => {
+            for (let attempt = 0; attempt < 30; attempt++) {
+              try {
+                const response = await fetch('http://127.0.0.1:3000/health', {
+                  signal: AbortSignal.timeout(1000),
+                });
+                if (response.ok && await smtpReady()) {
+                  assert.equal(response.status, 200);
+                  console.log('Container HTTP health and SMTP greeting passed');
+                  return;
+                }
+              } catch {}
+              await sleep(500);
+            }
+            throw new Error('Container did not expose healthy HTTP and SMTP listeners');
+          })().catch(error => { console.error(error); process.exitCode = 1; });
+          NODE
