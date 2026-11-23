@@ -19,9 +19,13 @@ if [ "${1-}" = "--python" ]; then
 fi
 
 if [ "$#" -eq 0 ] && command -v node >/dev/null 2>&1; then
-  if [ ! -d node_modules ] && command -v npm >/dev/null 2>&1; then
-    echo "Installing Node dependencies once..."
-    npm install --no-audit --no-fund
+  if [ ! -d node_modules ]; then
+    if ! command -v npm >/dev/null 2>&1; then
+      echo "Node dependencies are missing and npm is not installed. Install npm, then rerun ./start.sh." >&2
+      exit 1
+    fi
+    echo "Installing locked Node dependencies once..."
+    npm ci --no-audit --no-fund
   fi
   echo "Starting plug-and-play 1,000-agent Mail & Phone server on http://0.0.0.0:3000 (SMTP :2525)..."
   exec node server.js
