@@ -7,12 +7,17 @@
  * - Built-in SMTP receiver (:2525), local mail router, optional direct DNS MX / local Postfix send,
  *   SMS-style text messaging, browser-to-browser WebRTC calling + guest links,
  *   and generated Linux Asterisk PJSIP + USB SIM modem bridge configs.
+ * - Relay health (GET /api/relay, live SMTP EHLO probe, sends no mail) and
+ *   quota reporting (GET /api/quota, GET /api/quota/:address; in-memory
+ *   counters, reads never consume quota). Mail older than RETENTION_DAYS is
+ *   pruned by server-side arrival time on store and on boot.
  */
 'use strict';
 
 const express = require('express');
 const crypto = require('crypto');
 const dns = require('dns').promises;
+const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
@@ -38,6 +43,13 @@ const DATA_DIR = IN_MEMORY_ONLY ? null : path.resolve(DATA_DIR_ENV);
 const DIRECT_MX_OUTBOUND = String(process.env.DIRECT_MX_OUTBOUND ?? '1') !== '0';
 const LOCAL_POSTFIX_HOST = process.env.LOCAL_POSTFIX_HOST || '';
 const LOCAL_POSTFIX_PORT = Number(process.env.LOCAL_POSTFIX_PORT) || 25;
+// Quota reporting caps (0 = unlimited, reporting only — nothing enforces them yet).
+const SEND_MAX_PER_ADDRESS_PER_HOUR = Math.max(0, Number(process.env.SEND_MAX_PER_ADDRESS_PER_HOUR) || 0);
+const SEND_MAX_PER_ADDRESS_PER_DAY = Math.max(0, Number(process.env.SEND_MAX_PER_ADDRESS_PER_DAY) || 0);
+const ADDRESS_CREATE_MAX_PER_HOUR = Math.max(0, Number(process.env.ADDRESS_CREATE_MAX_PER_HOUR) || 0);
+// Relay probe: live SMTP EHLO handshake that sends no mail.
+const RELAY_PROBE_TIMEOUT_MS = Math.min(60000, Math.max(500, Number(process.env.RELAY_PROBE_TIMEOUT_MS) || 10000));
+const RELAY_PROBE_DOMAIN = String(process.env.RELAY_PROBE_DOMAIN || 'gmail.com').trim().toLowerCase() || 'gmail.com';
 
 // Free local domain by default — never rejects free/local domains or demands paid DNS
 function sanitizeDomain(raw) {
@@ -238,7 +250,9 @@ function initStore() {
 
   if (savedEmails && typeof savedEmails === 'object') {
     for (const [addr, list] of Object.entries(savedEmails)) {
-      if (Array.isArray(list)) inboxes.set(addr.toLowerCase(), list);
+      // Prune on boot too: saved mail otherwise survives forever until a
+      // new arrival to the same address triggers a store-time prune.
+      if (Array.isArray(list)) inboxes.set(addr.toLowerCase(), pruneExpiredEmails(list));
     }
   }
 
@@ -284,6 +298,9 @@ function validAddressParam(addr) {
   for (const label of labels) {
     if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(label)) return false;
   }
+  // TLD must be 2-63 alpha chars: rejects numeric / single-char TLDs that
+  // no real mailbox domain has (e.g. agent@host.123, agent@host.x).
+  if (!/^[a-z]{2,63}$/.test(labels[labels.length - 1])) return false;
   return true;
 }
 
@@ -451,6 +468,24 @@ function rememberMessage(key, id) {
   if (seenMessages.size > SEEN_MAX) seenMessages.delete(seenMessages.keys().next().value);
 }
 
+// Retention: the server-side arrival time is the only trustworthy clock.
+// The sender-supplied Date header can be out of order, in the future, or
+// missing, so a front-only scan keyed on it leaves expired mail buried
+// behind a newer-dated first message forever. Filter the whole list by
+// receivedAt (falling back to date for records that predate it); records
+// with no parseable timestamp at all are kept, never deleted on a guess.
+function retentionCutoffMs(nowMs = Date.now()) {
+  return nowMs - RETENTION_DAYS * 24 * 60 * 60 * 1000;
+}
+
+function pruneExpiredEmails(list, nowMs = Date.now()) {
+  const cutoff = retentionCutoffMs(nowMs);
+  return (list || []).filter(e => {
+    const t = Date.parse(e.receivedAt || e.date || '');
+    return Number.isNaN(t) || t >= cutoff;
+  });
+}
+
 function storeEmail(record) {
   const addr = record.address.toLowerCase();
   if (!inboxes.has(addr)) inboxes.set(addr, []);
@@ -466,9 +501,11 @@ function storeEmail(record) {
     receivedAt: new Date().toISOString(),
   };
   emails.push(stored);
-  const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
-  while (emails.length && new Date(emails[0].date).getTime() < cutoff) emails.shift();
+  const kept = pruneExpiredEmails(emails);
+  emails.length = 0;
+  emails.push(...kept);
   if (emails.length > 200) emails.splice(0, emails.length - 200);
+  recordReceive(addr);
   schedulePersist();
   mailEvents.emit(addr);
   return toEmailShape(stored);
@@ -517,6 +554,89 @@ function waitForArrival(address, ms) {
     const timer = setTimeout(done, Math.max(0, ms));
     mailEvents.once(address, done);
   });
+}
+
+// --- Quota counters (reporting only; caps are env-configured, 0 = unlimited) ---
+// In-memory, like the rate buckets that used to live here: counters reset on
+// restart, and reads never consume quota. Receives stay visible durably via
+// inbox size; sends and address creations exist only in these counters, so
+// the API says so honestly (see quotaSummary countersResetOnRestart).
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+const sendHits = new Map(); // from-address (lowercase) -> [epochMs of accepted sends]
+const receiveHits = new Map(); // address (lowercase) -> [epochMs of stored mail]
+const addressCreateHits = []; // [epochMs of actually-created addresses]
+
+function recordHit(map, key, nowMs = Date.now()) {
+  const hits = map.get(key) || [];
+  hits.push(nowMs);
+  const fresh = hits.filter(t => t > nowMs - DAY_MS);
+  if (fresh.length) map.set(key, fresh);
+  else map.delete(key);
+}
+
+function recordSend(from, nowMs = Date.now()) {
+  recordHit(sendHits, String(from || '').toLowerCase(), nowMs);
+}
+
+function recordReceive(address, nowMs = Date.now()) {
+  recordHit(receiveHits, String(address || '').toLowerCase(), nowMs);
+}
+
+function recordAddressCreation(nowMs = Date.now()) {
+  addressCreateHits.push(nowMs);
+  while (addressCreateHits.length && addressCreateHits[0] <= nowMs - DAY_MS) addressCreateHits.shift();
+}
+
+function resetQuotaCounters() {
+  sendHits.clear();
+  receiveHits.clear();
+  addressCreateHits.length = 0;
+}
+
+// One usage bucket: { limit, used, remaining, resetAt }. limit 0 means
+// unlimited (remaining null); resetAt is null when nothing was used.
+function bucketUsage(hits, windowMs, limit, nowMs = Date.now()) {
+  const recent = (hits || []).filter(t => t > nowMs - windowMs);
+  const used = recent.length;
+  const resetAt = used ? new Date(recent[0] + windowMs).toISOString() : null;
+  if (!limit) return { limit: 0, used, remaining: null, resetAt };
+  return { limit, used, remaining: Math.max(0, limit - used), resetAt };
+}
+
+function quotaForAddress(address, nowMs = Date.now()) {
+  const addr = String(address || '').toLowerCase();
+  return {
+    address: addr,
+    sends: {
+      hourly: bucketUsage(sendHits.get(addr), HOUR_MS, SEND_MAX_PER_ADDRESS_PER_HOUR, nowMs),
+      last24h: bucketUsage(sendHits.get(addr), DAY_MS, SEND_MAX_PER_ADDRESS_PER_DAY, nowMs),
+    },
+    receives: {
+      last24h: bucketUsage(receiveHits.get(addr), DAY_MS, 0, nowMs),
+      stored: (inboxes.get(addr) || []).length,
+    },
+  };
+}
+
+function quotaSummary(nowMs = Date.now()) {
+  const active = [...new Set([...sendHits.keys(), ...receiveHits.keys()])].sort();
+  let sendsToday = 0;
+  let receivesToday = 0;
+  for (const key of sendHits.keys()) sendsToday += bucketUsage(sendHits.get(key), DAY_MS, 0, nowMs).used;
+  for (const key of receiveHits.keys()) receivesToday += bucketUsage(receiveHits.get(key), DAY_MS, 0, nowMs).used;
+  return {
+    ok: true,
+    domain: activeDomain,
+    retentionDays: RETENTION_DAYS,
+    countersResetOnRestart: true,
+    global: {
+      sendsLast24h: sendsToday,
+      receivesLast24h: receivesToday,
+      addressCreationPerHour: bucketUsage(addressCreateHits, HOUR_MS, ADDRESS_CREATE_MAX_PER_HOUR, nowMs),
+    },
+    addresses: active.map(a => quotaForAddress(a, nowMs)),
+  };
 }
 
 // --- Outbound Mail (100% self-hosted: local router, local Postfix, or direct MX) ---
@@ -680,6 +800,112 @@ async function sendAgentMail({ from, fromName, to, subject, text, html }) {
   };
 }
 
+// --- Outbound relay health (live probe, sends no mail) ---
+// Connects, reads the 220 banner, sends EHLO, waits for the final 250 line,
+// then QUITs. Local Postfix is probed directly; direct-MX mode has no single
+// relay, so the probe resolves the MX of RELAY_PROBE_DOMAIN and handshakes
+// with it — that is the check that catches outbound port 25 being blocked.
+// Local-only mode has no outbound path to probe and reports unconfigured.
+function probeSmtpGreeting(host, port, timeoutMs) {
+  return new Promise(resolve => {
+    const socket = net.createConnection({ host, port });
+    let stage = 0; // 0: waiting for 220 banner, 1: waiting for EHLO 250
+    let buf = '';
+    let done = false;
+    const finish = (result, destroySocket = true) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      // On success the socket is half-closed (QUIT sent, FIN after it) so
+      // the peer's 221 can still arrive; destroying here would RST the
+      // connection and raise ECONNRESET on the peer. Other paths destroy.
+      if (destroySocket) {
+        try { socket.destroy(); } catch { /* already gone */ }
+      }
+      resolve(result);
+    };
+    const timer = setTimeout(
+      () => finish({ ok: false, detail: `SMTP probe to ${host}:${port} timed out after ${timeoutMs}ms` }),
+      Math.max(100, timeoutMs),
+    );
+    socket.on('error', err => finish({ ok: false, detail: `SMTP probe to ${host}:${port} failed: ${err.message}` }));
+    socket.on('close', () => {
+      if (!done) finish({ ok: false, detail: `SMTP probe to ${host}:${port} closed before EHLO completed` });
+    });
+    socket.on('data', chunk => {
+      buf += chunk.toString('utf8');
+      if (!buf.includes('\r\n')) return;
+      const lines = buf.split('\r\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (stage === 0) {
+          if (!/^220/.test(line)) {
+            return finish({ ok: false, detail: `SMTP probe to ${host}:${port} got unexpected banner: ${line.slice(0, 80)}` });
+          }
+          stage = 1;
+          socket.write('EHLO agent-mail-service\r\n');
+        } else if (stage === 1) {
+          if (!/^250/.test(line)) {
+            return finish({ ok: false, detail: `SMTP probe to ${host}:${port} EHLO rejected: ${line.slice(0, 80)}` });
+          }
+          if (/^250 /.test(line)) {
+            // Final 250 line (250- lines are multi-line continuations).
+            try { socket.write('QUIT\r\n'); socket.end(); } catch { /* closing anyway */ }
+            return finish({ ok: true, detail: `SMTP EHLO ok on ${host}:${port}` }, false);
+          }
+        }
+      }
+    });
+  });
+}
+
+async function relayHealth() {
+  const checkedAt = new Date().toISOString();
+  if (LOCAL_POSTFIX_HOST) {
+    const probe = await probeSmtpGreeting(LOCAL_POSTFIX_HOST, LOCAL_POSTFIX_PORT, RELAY_PROBE_TIMEOUT_MS);
+    return {
+      provider: 'linux-postfix',
+      host: LOCAL_POSTFIX_HOST,
+      port: LOCAL_POSTFIX_PORT,
+      status: probe.ok ? 'usable' : 'probe-failed',
+      detail: probe.detail,
+      checkedAt,
+    };
+  }
+  if (!DIRECT_MX_OUTBOUND) {
+    return {
+      provider: 'local-only',
+      status: 'unconfigured',
+      detail: 'External outbound is disabled (local-only mode). Set LOCAL_POSTFIX_HOST or DIRECT_MX_OUTBOUND=1.',
+      checkedAt,
+    };
+  }
+  let mxHost;
+  try {
+    const records = await dns.resolveMx(RELAY_PROBE_DOMAIN);
+    if (!records || !records.length) throw new Error(`No MX records for ${RELAY_PROBE_DOMAIN}`);
+    records.sort((a, b) => a.priority - b.priority);
+    mxHost = records[0].exchange;
+  } catch (err) {
+    return {
+      provider: 'direct-mx',
+      probeDomain: RELAY_PROBE_DOMAIN,
+      status: 'probe-failed',
+      detail: `MX lookup for ${RELAY_PROBE_DOMAIN} failed: ${err.message}`,
+      checkedAt,
+    };
+  }
+  const probe = await probeSmtpGreeting(mxHost, 25, RELAY_PROBE_TIMEOUT_MS);
+  return {
+    provider: 'direct-mx',
+    probeDomain: RELAY_PROBE_DOMAIN,
+    mxHost,
+    status: probe.ok ? 'usable' : 'probe-failed',
+    detail: probe.detail,
+    checkedAt,
+  };
+}
+
 // --- Built-in SMTP Listener ---
 const smtp = new SMTPServer({
   disabledCommands: ['AUTH', 'STARTTLS'],
@@ -812,6 +1038,31 @@ app.get('/api/dns', (_req, res) => {
   res.json({ ok: true, domain: activeDomain, dkim: DKIM_STATUS.status, records });
 });
 
+// Outbound relay health: 200 when the outbound path handshakes, 503 when it
+// is unconfigured or the live probe fails. The probe sends no mail.
+app.get('/api/relay', async (_req, res) => {
+  const health = await relayHealth();
+  res.status(health.status === 'usable' ? 200 : 503).json({ ok: health.status === 'usable', ...health });
+});
+
+// Quota usage reporting (read-only; reads never consume quota). Limits are
+// env-configured and 0 means unlimited; counters are in-memory and reset on
+// restart, while stored inbox counts survive restarts on disk.
+app.get('/api/quota', (_req, res) => {
+  res.json(quotaSummary());
+});
+
+app.get('/api/quota/:address', (req, res) => {
+  const addr = decodeURIComponent(req.params.address).toLowerCase();
+  if (!validAddressParam(addr)) {
+    return res.status(400).json({ ok: false, error: 'Invalid address format' });
+  }
+  if (!addressOwner.has(addr) && !(inboxes.get(addr) || []).length) {
+    return res.status(404).json({ ok: false, error: 'Unknown address' });
+  }
+  res.json({ ok: true, ...quotaForAddress(addr) });
+});
+
 // Change active free domain anytime (zero restrictions on .local/.lan/duckdns/custom)
 app.post('/api/domain', (req, res) => {
   const nextDomain = sanitizeDomain((req.body || {}).domain);
@@ -896,6 +1147,7 @@ app.post('/api/addresses', (req, res) => {
   }
   addressOwner.set(address, ext);
   if (!inboxes.has(address)) inboxes.set(address, []);
+  recordAddressCreation();
   schedulePersist();
   res.json({ ok: true, existing: false, address, extension: ext });
 });
@@ -917,6 +1169,7 @@ app.post('/api/send', async (req, res) => {
     const v = validateSendBody(req.body || {});
     if (!v.ok) return res.status(400).json({ ok: false, error: v.error });
     const result = await sendAgentMail(v.value);
+    recordSend(v.value.from);
     res.json({
       ok: true,
       from: v.value.from,
@@ -1280,4 +1533,15 @@ module.exports = {
   setSendTransport,
   storeEmail,
   dkimPublicKeyRecord,
+  pruneExpiredEmails,
+  retentionCutoffMs,
+  bucketUsage,
+  quotaForAddress,
+  quotaSummary,
+  recordSend,
+  recordReceive,
+  recordAddressCreation,
+  resetQuotaCounters,
+  probeSmtpGreeting,
+  relayHealth,
 };

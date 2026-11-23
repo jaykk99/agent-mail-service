@@ -360,6 +360,16 @@
             <div id="emailList" style="margin-top:12px"></div>
           </div>
         </div>
+
+        <div class="card">
+          <div class="row" style="justify-content:space-between;margin-bottom:8px">
+            <h3 style="margin:0">Relay Health &amp; Quota</h3>
+            <button class="secondary" id="refreshRelayBtn">Refresh</button>
+          </div>
+          <div id="relayBox" class="small mono">Loading relay health...</div>
+          <div id="quotaBox" class="small" style="margin-top:8px">Loading quota...</div>
+          <div class="small" style="margin-top:8px">Quota counters are in-memory and reset on restart; stored inbox counts survive restarts on disk. Mail older than the retention window is pruned by arrival time.</div>
+        </div>
       </section>
 
       <!-- PHONE & SMS TAB -->
@@ -547,6 +557,7 @@
       state.signalCursor = cursorRes.cursor;
 
       await loadAgentMailboxes();
+      await loadRelayQuota();
       await loadSmsFeed();
     }
 
@@ -627,6 +638,29 @@
       } else {
         const empty = $('smsEmpty');
         if (empty) empty.remove();
+      }
+    }
+
+    async function loadRelayQuota() {
+      try {
+        // /api/relay answers 503 when unusable, so read it raw instead of api().
+        const r = await fetch('/api/relay');
+        const d = await r.json();
+        $('relayBox').textContent = `${d.provider} — ${d.status}: ${d.detail}`;
+        $('relayBox').style.color = d.status === 'usable' ? 'var(--green)' : 'var(--amber)';
+      } catch {
+        $('relayBox').textContent = 'Relay health unavailable';
+      }
+      const addr = $('activeMailboxSelect').value || state.selectedMailbox;
+      if (!addr) { $('quotaBox').textContent = ''; return; }
+      try {
+        const q = await api(`/api/quota/${encodeURIComponent(addr)}`);
+        const s = q.sends;
+        const r = q.receives;
+        const fmt = b => `${b.used}/${b.limit || '∞'}${b.remaining === null ? '' : ` (${b.remaining} left)`}`;
+        $('quotaBox').textContent = `${addr}: sent ${fmt(s.hourly)} this hour, ${fmt(s.last24h)} last 24h · received ${r.last24h.used} last 24h, ${r.stored} stored`;
+      } catch {
+        $('quotaBox').textContent = 'Quota unavailable for ' + addr;
       }
     }
 
@@ -834,8 +868,11 @@
         $('mailBody').value = '';
         toast('Delivered via ' + r.provider);
         await loadInbox();
+        await loadRelayQuota();
       } catch (err) { toast(err.message); }
     };
+
+    $('refreshRelayBtn').onclick = () => loadRelayQuota();
 
     $('testSelfMailBtn').onclick = async () => {
       const addr = $('activeMailboxSelect').value;

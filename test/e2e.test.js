@@ -98,6 +98,8 @@ async function test(name, fn) {
       assert.equal(r.status, 200);
       const html = await r.text();
       assert.match(html, /Linux Agent Mail &amp; Phone/);
+      assert.match(html, /Relay Health &amp; Quota/);
+      assert.match(html, /loadRelayQuota/);
     });
 
     await test('GET /api/agents lists 1,000 mailboxes and extensions 2000..2999', async () => {

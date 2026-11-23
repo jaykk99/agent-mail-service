@@ -8,8 +8,8 @@
     "start": "node server.js",
     "build": "node --check server.js",
     "lint": "npm run check",
-    "test": "node test/unit.test.js && node test/e2e.test.js && node test/outbound.test.js && node test/render.http.test.js",
-    "check": "node --check server.js && node --check test/e2e.test.js && node --check test/unit.test.js && node --check test/outbound.test.js && node --check test/render.http.test.js"
+    "test": "node test/unit.test.js && node test/e2e.test.js && node test/outbound.test.js && node test/render.http.test.js && node test/relay-quota.test.js",
+    "check": "node --check server.js && node --check test/e2e.test.js && node --check test/unit.test.js && node --check test/outbound.test.js && node --check test/render.http.test.js && node --check test/relay-quota.test.js"
   },
   "engines": {
     "node": ">=18"

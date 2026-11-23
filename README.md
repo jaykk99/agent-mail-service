@@ -58,6 +58,32 @@ By default, the service uses `agents.local` with no configuration needed. You ca
 - **Linux Hardware / SIP Bridge (No 3rd-Party APIs)**: Use the generated `./data/linux-configs/` files to attach local **Asterisk PJSIP** (`:5060`), **Postfix**, or a **USB GSM/4G SIM card modem** (`chan_dongle` / ModemManager `sim-modem-bridge.sh`) for real cellular calls and SMS directly from Linux.
   - Note: Public cellular calling/SMS requires a SIM-card hardware modem or SIP trunk, and direct public internet email delivery requires open port 25 and DNS MX records.
 
+## Relay health, quota & retention (API)
+
+- `GET /api/relay` — outbound relay health. Runs a live SMTP EHLO handshake
+  against the configured path and sends no mail: local Postfix is probed
+  directly; direct-MX mode resolves the MX of `RELAY_PROBE_DOMAIN`
+  (default `gmail.com`) and handshakes with it, which is the check that
+  catches outbound port 25 being blocked. Answers 200 when usable, 503
+  when unconfigured (local-only mode) or the probe fails.
+- `GET /api/quota` — global + per-address usage: sends per address (hourly
+  and last-24h buckets), receives last 24h, stored inbox counts, and
+  address creations per hour. `GET /api/quota/:address` reports one
+  address (400 bad format, 404 unknown address). Reads never consume quota.
+  Counters are in-memory and reset on restart; stored inbox counts survive
+  restarts on disk. Limits are env-configured and `0` means unlimited
+  (reporting only, nothing enforces them yet):
+  `SEND_MAX_PER_ADDRESS_PER_HOUR`, `SEND_MAX_PER_ADDRESS_PER_DAY`,
+  `ADDRESS_CREATE_MAX_PER_HOUR`, `RELAY_PROBE_TIMEOUT_MS` (default 10000),
+  `RELAY_PROBE_DOMAIN` (default `gmail.com`).
+- Retention: mail older than `RETENTION_DAYS` (default 30) is pruned by
+  server-side arrival time (`receivedAt`), not the sender-supplied Date
+  header, on every store and on boot. The dashboard shows relay health and
+  the selected mailbox's quota.
+- Address validation: the TLD must be 2–63 alpha characters, so numeric or
+  single-character TLDs (`user@host.123`) are rejected at send, inbox-read,
+  and quota time.
+
 ## Tests
 
 ```bash
