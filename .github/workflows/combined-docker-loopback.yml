@@ -45,6 +45,37 @@ jobs:
           done
           curl --silent --output /dev/null --max-time 5 http://127.0.0.1:3000/
           timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/25; IFS= read -r line <&3; [[ "$line" == 220* ]]'
+      - name: Reject connections through non-loopback host interface
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const os = require('node:os');
+          const net = require('node:net');
+          const addresses = Object.values(os.networkInterfaces()).flat()
+            .filter(i => i && i.family === 'IPv4' && !i.internal).map(i => i.address);
+          assert.ok(addresses.length, 'runner must have a non-loopback IPv4 interface');
+          function probe(host, port) {
+            return new Promise((resolve, reject) => {
+              const socket = net.connect({host, port});
+              socket.setTimeout(2000);
+              socket.once('connect', () => {socket.destroy(); reject(new Error(host + ':' + port + ' unexpectedly reachable'));});
+              socket.once('timeout', () => {socket.destroy(); reject(new Error(host + ':' + port + ' timed out (inconclusive)'));});
+              socket.once('error', error => {
+                socket.destroy();
+                if (error.code === 'ECONNREFUSED') resolve();
+                else reject(error);
+              });
+            });
+          }
+          (async () => {
+            for (const address of addresses) {
+              for (const port of [25, 3000]) {
+                await probe(address, port);
+                console.log('PASS: non-loopback ' + address + ':' + port + ' refused');
+              }
+            }
+          })().catch(e => {console.error(e); process.exitCode = 1;});
+          NODE
       - name: Show logs on failure
         if: failure()
         run: docker compose logs --no-color --tail=100
