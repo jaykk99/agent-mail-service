@@ -26,7 +26,7 @@ jobs:
 
       - name: Verify packaged relative imports resolve inside image
         run: |
-          docker run --rm --entrypoint node agent-mail-smoke - <<'NODE'
+          docker run --rm -i --entrypoint node agent-mail-smoke - <<'NODE'
           const fs = require('node:fs');
           const path = require('node:path');
           const assert = require('node:assert/strict');
