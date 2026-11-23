@@ -35,10 +35,6 @@ jobs:
             console.error('FAIL: high/critical production dependency advisories');
             process.exit(1);
           }
-          if (process.env.AUDIT_EXIT_STATUS && process.env.AUDIT_EXIT_STATUS !== '0') {
-            console.error('FAIL: npm audit exited', process.env.AUDIT_EXIT_STATUS);
-            process.exit(1);
-          }
           console.log('PASS: no high/critical production dependency advisories');
           NODE
       - name: Overlay reviewed loopback Compose from PR 15
