@@ -18,7 +18,7 @@ assert.ok(files.includes(path.join(root, 'server.js')), 'server.js missing from 
 let checked = 0;
 for (const file of files) {
   const source = fs.readFileSync(file, 'utf8');
-  const imports = [...source.matchAll(/\\brequire\\s*\\(\\s*['"]([.][^'"]+)['"]\\s*\\)/g)];
+  const imports = [...source.matchAll(/\brequire\s*\(\s*['"]([.][^'"]+)['"]\s*\)/g)];
   for (const match of imports) {
     const target = match[1];
     assert.doesNotThrow(
