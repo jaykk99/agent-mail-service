@@ -1,0 +1,25 @@
+name: Docker runtime module smoke
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - server.js
+      - 'lib/**'
+      - '.github/workflows/docker-runtime-smoke.yml'
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - server.js
+      - 'lib/**'
+      - '.github/workflows/docker-runtime-smoke.yml'
+permissions:
+  contents: read
+jobs:
+  docker-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t agent-mail-smoke .
+      - name: Resolve and load required module inside image
+        run: docker run --rm --entrypoint node agent-mail-smoke -e "require('./lib/linux-configs'); console.log('Linux configs module loaded')"
