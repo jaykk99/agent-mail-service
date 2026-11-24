@@ -1,0 +1,25 @@
+name: Docker publication security
+on:
+  pull_request:
+    paths:
+      - 'docker-compose.yml'
+      - 'test/docker-ports.test.js'
+      - '.github/workflows/docker-publication-security.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docker-compose.yml'
+      - 'test/docker-ports.test.js'
+      - '.github/workflows/docker-publication-security.yml'
+permissions:
+  contents: read
+jobs:
+  docker-publication:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test test/docker-ports.test.js
+      - run: docker compose config --quiet

@@ -1,0 +1,35 @@
+name: Docker Compose loopback port contract
+on:
+  pull_request:
+    paths:
+      - docker-compose.yml
+      - .github/workflows/compose-loopback.yml
+  workflow_dispatch:
+
+jobs:
+  compose-loopback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose and loopback host bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose config --quiet
+          docker compose config --format json > /tmp/mail-compose.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          config = json.loads(Path('/tmp/mail-compose.json').read_text())
+          mail = config['services']['mail']
+          ports = mail['ports']
+          expected = {('25', '2525'), ('3000', '3000')}
+          actual = {(str(p['published']), str(p['target'])) for p in ports}
+          assert actual == expected, f'unexpected published ports: {actual}'
+          assert len(ports) == 2, f'unexpected extra ports: {ports}'
+          assert all(p.get('host_ip') == '127.0.0.1' for p in ports), ports
+          environment = mail['environment']
+          assert environment['SMTP_HOST'] == '0.0.0.0', environment
+          print('PASS: Compose parses; only SMTP and HTTP are host-published, both bound to 127.0.0.1')
+          PY

@@ -1,4 +1,5 @@
-# Self-hosted stack: zero third-party APIs or secret env vars required.
+# Local-only by default. For intentional public mail hosting, explicitly configure
+# firewall rules, authentication, TLS and the host interface before exposing ports.
 services:
   mail:
     build: .
@@ -6,11 +7,12 @@ services:
     environment:
       MAIL_DOMAIN: "${MAIL_DOMAIN:-agents.local}"
       SMTP_PORT: "2525"
+      SMTP_HOST: "0.0.0.0" # Container interface; host publication stays loopback-only.
       PORT: "3000"
       DATA_DIR: "/app/data"
     ports:
-      - "25:2525"
-      - "3000:3000"
+      - "127.0.0.1:25:2525"
+      - "127.0.0.1:3000:3000"
     volumes:
       - mail_data:/app/data
 volumes:
