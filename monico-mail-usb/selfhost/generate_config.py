@@ -13,12 +13,36 @@ import re
 DOMAIN_PATTERN = re.compile(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 
 
-def check_domain(domain):
+# Single-label hostnames and the special-use names reserved by RFC 2606 /
+# RFC 6761 can never be delegated, so publishing DNS for them is a mistake.
+# .local and .lan stay allowed: the offline "agents.local" default needs them.
+_RESERVED_TLDS = {"invalid", "test", "example", "localhost"}
+_RESERVED_DOMAINS = {"example.com", "example.net", "example.org"}
+
+
+def check_local_domain(domain):
+    """Format-only validation for the offline domain config.
+
+    Local installs legitimately use names that are not delegable, such as
+    `agents.local`, `home.lan` or `localhost`, so only the syntax is checked
+    here. Publishing public DNS goes through check_domain(), which refuses the
+    names that can never be delegated.
+    """
     domain = str(domain or "agents.local").strip().lower().lstrip("@")
     if not domain:
         return "agents.local"
     if not DOMAIN_PATTERN.fullmatch(domain) or ".." in domain:
         raise ValueError("Invalid domain format (use letters, numbers, dots, hyphens)")
+    return domain
+
+
+def check_domain(domain):
+    domain = check_local_domain(domain)
+    if "." not in domain:
+        raise ValueError("Use a fully qualified domain name such as mail.example.org, not a bare hostname")
+    tld = domain.rsplit(".", 1)[1]
+    if domain in _RESERVED_DOMAINS or tld in _RESERVED_TLDS:
+        raise ValueError("Reserved example/test domain; use a domain you actually own")
     return domain
 
 
