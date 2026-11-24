@@ -80,10 +80,26 @@ class WiringTests(unittest.TestCase):
                          "export MONICO_DOMAIN=my-owned-domain.org\n")
 
     def test_invalid_domain_is_not_configured(self):
-        for domain in ("mail.example.invalid", "example.com", "myfake.test"):
+        for domain in ("mail.example.invalid", "example.com", "myfake.test",
+                       "agents.local", "mail.local", "foo.onion"):
             with self.subTest(domain=domain), self.assertRaises(ValueError):
                 setup(domain, usb_name="USB Drive", config_dir=self.private,
                       removable=self.mount)
+
+    def test_setup_requires_an_explicit_domain(self):
+        # setup() is the real-install path: no local default may silently
+        # slip through the delegable-domain gate.
+        with self.assertRaisesRegex(ValueError, "Pass --domain"):
+            setup(usb_name="USB Drive", config_dir=self.private, removable=self.mount)
+        self.assertFalse((self.private / "domain.env").exists())
+        environment = dict(os.environ)
+        environment["HOME"] = str(self.home)
+        proc = subprocess.run([sys.executable, str(PROJECT_ROOT / "setup_monico.py"),
+                               "--usb", "USB Drive"],
+                              cwd=PROJECT_ROOT, env=environment, capture_output=True,
+                              text=True, timeout=15)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("--domain", proc.stderr)
 
     def test_path_traversal_is_rejected(self):
         for name in ("../other", "/tmp", "..", ".", "a/b"):

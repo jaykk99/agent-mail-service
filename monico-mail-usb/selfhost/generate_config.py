@@ -15,9 +15,12 @@ DOMAIN_PATTERN = re.compile(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9
 
 # Single-label hostnames and the special-use names reserved by RFC 2606 /
 # RFC 6761 can never be delegated, so publishing DNS for them is a mistake.
-# .local and .lan stay allowed: the offline "agents.local" default needs them.
-_RESERVED_TLDS = {"invalid", "test", "example", "localhost"}
-_RESERVED_DOMAINS = {"example.com", "example.net", "example.org"}
+# Neither can .local (RFC 6762 mDNS, link-local only), .onion (RFC 7686,
+# Tor-only) or .home.arpa (RFC 8375, home networks): none of them exists in
+# public DNS. The offline "agents.local" default stays allowed only in
+# check_local_domain(), the format-only check for local-only installs.
+_RESERVED_TLDS = {"invalid", "test", "example", "localhost", "local", "onion"}
+_RESERVED_DOMAINS = {"example.com", "example.net", "example.org", "home.arpa"}
 
 
 def check_local_domain(domain):
@@ -41,8 +44,8 @@ def check_domain(domain):
     if "." not in domain:
         raise ValueError("Use a fully qualified domain name such as mail.example.org, not a bare hostname")
     tld = domain.rsplit(".", 1)[1]
-    if domain in _RESERVED_DOMAINS or tld in _RESERVED_TLDS:
-        raise ValueError("Reserved example/test domain; use a domain you actually own")
+    if domain in _RESERVED_DOMAINS or domain.endswith(".home.arpa") or tld in _RESERVED_TLDS:
+        raise ValueError("Domain can never be delegated in public DNS (reserved or special-use name); use a domain you actually own")
     return domain
 
 

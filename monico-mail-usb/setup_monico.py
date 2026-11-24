@@ -55,10 +55,17 @@ def save_storage_config(data_dir, output):
     return target
 
 
-def setup(domain="agents.local", usb_name=None, data_path=None, config_dir=CONFIG_DIR, removable=REMOVABLE):
-    """Ensure storage exists and configure a free/local or custom domain."""
-    # A real install gets a domain it can actually delegate; the deliberately
-    # permissive write_domain_config() stays for offline/local-only setup.
+def setup(domain=None, usb_name=None, data_path=None, config_dir=CONFIG_DIR, removable=REMOVABLE):
+    """Ensure storage exists and configure a domain you actually own."""
+    # setup() is the real-install path: the domain must be one that can
+    # actually be delegated, so there is no local default here. Offline or
+    # local-only installs (e.g. agents.local) go through the deliberately
+    # permissive write_domain_config() in configure_domain.py instead.
+    if domain is None:
+        raise ValueError(
+            "Pass --domain with a domain you actually own "
+            "(e.g. --domain your-owned-domain.org). For a local-only install "
+            "with agents.local, use configure_domain.py instead.")
     domain = check_domain(domain)
     if usb_name is not None and data_path is not None:
         raise ValueError("Provide at most one of --usb or --data")
@@ -84,15 +91,15 @@ def setup(domain="agents.local", usb_name=None, data_path=None, config_dir=CONFI
     storage_file = config_dir / "storage.env"
     write_domain_config(domain, domain_file, data / "agents.sqlite3")
     save_storage_config(data, storage_file)
-    return {"domain": (domain or "agents.local").strip().lower(), "data": str(data.resolve()),
+    return {"domain": domain, "data": str(data.resolve()),
             "domain_file": str(domain_file), "storage_file": str(storage_file),
             "public_domain_verified": False}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--domain", default="agents.local",
-                        help="Free local or custom domain (default: agents.local)")
+    parser.add_argument("--domain", required=True,
+                        help="Domain you actually own (e.g. your-owned-domain.org)")
     location = parser.add_mutually_exclusive_group(required=False)
     location.add_argument("--usb", help="Drive name shown by ls /mnt/chromeos/removable")
     location.add_argument("--data", help="Existing directory (defaults to ~/agent-mail-data)")

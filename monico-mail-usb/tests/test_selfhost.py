@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from selfhost.generate_config import render, check_domain
+from selfhost.generate_config import render, check_domain, check_local_domain
 
 class SelfHostedConfigTests(unittest.TestCase):
     def test_generate_independent_mail_stack(self):
@@ -27,9 +27,24 @@ class SelfHostedConfigTests(unittest.TestCase):
             self.assertIn("IN MX", output["dns-zone-example.txt"])
 
     def test_reject_fake_domains(self):
-        for domain in ("mail.example.invalid", "example.com", "localhost", "fake.test", "foo"):
+        for domain in ("mail.example.invalid", "example.com", "localhost", "fake.test", "foo",
+                       "mail.local", "agents.local", "foo.onion", "mail.home.arpa", "home.arpa"):
             with self.subTest(domain=domain), self.assertRaises(ValueError):
                 check_domain(domain)
+
+    def test_special_use_domains_never_reach_public_templates(self):
+        # render() publishes public Postfix/Dovecot/DNS configs, so a
+        # special-use name must fail there too, not just in check_domain().
+        for domain in ("mail.local", "foo.onion", "mail.home.arpa"):
+            with self.subTest(domain=domain), self.assertRaises(ValueError):
+                render(domain, "/mnt/data/agents.sqlite3", "/mnt/data/mail", 2001, 2001,
+                       "/etc/ssl/mail.pem", "/etc/ssl/mail.key", "1.1.1.1")
+
+    def test_local_domain_check_still_allows_offline_names(self):
+        # The offline-only path is deliberately permissive: local installs
+        # legitimately use names that can never be delegated.
+        for domain in ("agents.local", "home.lan", "localhost"):
+            self.assertEqual(check_local_domain(domain), domain)
 
     def test_reject_non_public_ip_and_bad_uid(self):
         args = ["monicomail.org", "/mnt/data/agents.sqlite3", "/mnt/data/mail", 2001, 2001,
