@@ -12,6 +12,7 @@ import sqlite3
 import tempfile
 
 from selfhost.configure_domain import write_domain_config
+from selfhost.generate_config import check_domain
 
 
 CONFIG_DIR = Path.home() / ".config" / "monico-mail"
@@ -56,6 +57,9 @@ def save_storage_config(data_dir, output):
 
 def setup(domain="agents.local", usb_name=None, data_path=None, config_dir=CONFIG_DIR, removable=REMOVABLE):
     """Ensure storage exists and configure a free/local or custom domain."""
+    # A real install gets a domain it can actually delegate; the deliberately
+    # permissive write_domain_config() stays for offline/local-only setup.
+    domain = check_domain(domain)
     if usb_name is not None and data_path is not None:
         raise ValueError("Provide at most one of --usb or --data")
     if usb_name is not None:

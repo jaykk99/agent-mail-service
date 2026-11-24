@@ -11,9 +11,9 @@ import shlex
 import sqlite3
 import tempfile
 try:
-    from .generate_config import check_domain
+    from .generate_config import check_local_domain
 except ImportError:
-    from generate_config import check_domain
+    from generate_config import check_local_domain
 
 
 def read_existing_domain(db_path):
@@ -44,7 +44,8 @@ def read_existing_domain(db_path):
 
 
 def write_domain_config(domain, output_file, db_path=None):
-    domain = check_domain(domain)
+    # Local config: local names are fine, only the syntax has to hold.
+    domain = check_local_domain(domain)
     if db_path:
         previous = read_existing_domain(db_path)
         if previous is not None and previous != domain:
