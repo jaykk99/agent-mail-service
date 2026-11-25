@@ -128,6 +128,30 @@ const phoneEvents = [];
 let nextPhoneEventId = 1;
 const guestInvites = new Map();
 const guestSessions = new Map();
+// Guest invites/sessions used to live in these maps forever: expiry was only
+// checked on use, so every issued invite and session accumulated unboundedly.
+// Prune expired entries on every guest write/read path, and evict the oldest
+// entries if the maps ever grow past the cap (e.g. a flood of invites).
+const GUEST_STATE_MAX = 10000;
+function pruneExpiredGuestState(nowMs = Date.now()) {
+  for (const [token, invite] of guestInvites) {
+    if (invite.expiresAt <= nowMs) guestInvites.delete(token);
+  }
+  for (const [token, sess] of guestSessions) {
+    if (sess.expiresAt <= nowMs) guestSessions.delete(token);
+  }
+  for (const map of [guestInvites, guestSessions]) {
+    while (map.size > GUEST_STATE_MAX) {
+      let oldestKey = null;
+      let oldestExp = Infinity;
+      for (const [key, entry] of map) {
+        if (entry.expiresAt < oldestExp) { oldestExp = entry.expiresAt; oldestKey = key; }
+      }
+      if (oldestKey === null) break;
+      map.delete(oldestKey);
+    }
+  }
+}
 const mailEvents = new EventEmitter();
 mailEvents.setMaxListeners(0);
 
@@ -642,7 +666,6 @@ function quotaSummary(nowMs = Date.now()) {
 // --- Outbound Mail (100% self-hosted: local router, local Postfix, or direct MX) ---
 let customSendTransport = null;
 function setSendTransport(t) { customSendTransport = t || null; }
-
 function validateSendBody(body) {
   if (!body || typeof body !== 'object') {
     return { ok: false, error: 'Request body must be a JSON object' };
@@ -684,17 +707,29 @@ async function deliverDirectMx({ from, toAddr, subject, text, html }) {
     throw new Error(`No MX records found for ${hostDomain}`);
   }
   mxRecords.sort((a, b) => a.priority - b.priority);
-  const transport = nodemailer.createTransport({
-    host: mxRecords[0].exchange,
-    port: 25,
-    secure: false,
-    connectionTimeout: 8000,
-    greetingTimeout: 8000,
-    dkim: DKIM_STATUS.status === 'configured'
-      ? { domainName: activeDomain, keySelector: DKIM_SELECTOR, privateKey: DKIM_PRIVATE_KEY }
-      : undefined,
-  });
-  return transport.sendMail({ from, to: toAddr, subject, text, html });
+  // Try every MX in priority order: a dead top-priority host must not fail
+  // the send while a lower-priority host is up.
+  let lastError = null;
+  for (const mx of mxRecords) {
+    const transport = nodemailer.createTransport({
+      host: mx.exchange,
+      port: 25,
+      secure: false,
+      connectionTimeout: 8000,
+      greetingTimeout: 8000,
+      dkim: DKIM_STATUS.status === 'configured'
+        ? { domainName: activeDomain, keySelector: DKIM_SELECTOR, privateKey: DKIM_PRIVATE_KEY }
+        : undefined,
+    });
+    try {
+      return await transport.sendMail({ from, to: toAddr, subject, text, html });
+    } catch (err) {
+      lastError = err;
+    } finally {
+      try { transport.close(); } catch { /* already closed */ }
+    }
+  }
+  throw lastError;
 }
 
 async function sendAgentMail({ from, fromName, to, subject, text, html }) {
@@ -811,6 +846,8 @@ function probeSmtpGreeting(host, port, timeoutMs) {
     const socket = net.createConnection({ host, port });
     let stage = 0; // 0: waiting for 220 banner, 1: waiting for EHLO 250
     let buf = '';
+    // A peer that streams without CRLF must not grow this buffer forever.
+    const PROBE_MAX_BUFFER = 64 * 1024;
     let done = false;
     const finish = (result, destroySocket = true) => {
       if (done) return;
@@ -834,12 +871,18 @@ function probeSmtpGreeting(host, port, timeoutMs) {
     });
     socket.on('data', chunk => {
       buf += chunk.toString('utf8');
+      if (buf.length > PROBE_MAX_BUFFER) {
+        return finish({ ok: false, detail: `SMTP probe to ${host}:${port} got a response over ${PROBE_MAX_BUFFER} bytes without a complete line` });
+      }
       if (!buf.includes('\r\n')) return;
       const lines = buf.split('\r\n');
       buf = lines.pop();
       for (const line of lines) {
         if (stage === 0) {
-          if (!/^220/.test(line)) {
+          // Multi-line banner: 220- lines are continuations, only the
+          // final 220 line (220 followed by a space or end of line) counts.
+          if (/^220-/.test(line)) continue;
+          if (!/^220( |$)/.test(line)) {
             return finish({ ok: false, detail: `SMTP probe to ${host}:${port} got unexpected banner: ${line.slice(0, 80)}` });
           }
           stage = 1;
@@ -848,7 +891,7 @@ function probeSmtpGreeting(host, port, timeoutMs) {
           if (!/^250/.test(line)) {
             return finish({ ok: false, detail: `SMTP probe to ${host}:${port} EHLO rejected: ${line.slice(0, 80)}` });
           }
-          if (/^250 /.test(line)) {
+          if (/^250( |$)/.test(line)) {
             // Final 250 line (250- lines are multi-line continuations).
             try { socket.write('QUIT\r\n'); socket.end(); } catch { /* closing anyway */ }
             return finish({ ok: true, detail: `SMTP EHLO ok on ${host}:${port}` }, false);
@@ -1375,6 +1418,7 @@ app.post('/api/webphone/invites', (req, res) => {
   const body = req.body || {};
   const ext = resolveExtension(body.extension || '2000') || '2000';
   const ttlMinutes = Math.min(1440, Math.max(1, Number(body.ttlMinutes) || 30));
+  pruneExpiredGuestState();
   const token = crypto.randomBytes(24).toString('base64url');
   const expiresAt = Date.now() + ttlMinutes * 60 * 1000;
   guestInvites.set(token, { token, extension: ext, expiresAt, used: false });
@@ -1389,11 +1433,13 @@ app.post('/api/webphone/invites', (req, res) => {
 });
 
 app.post('/api/webphone/session', (req, res) => {
+  pruneExpiredGuestState();
   const invite = guestInvites.get(String((req.body || {}).invite || ''));
   if (!invite || invite.used || invite.expiresAt < Date.now()) {
     return res.status(401).json({ ok: false, error: 'Invitation invalid, expired, or already used' });
   }
   invite.used = true;
+  guestInvites.delete(String((req.body || {}).invite || ''));
   const sessionToken = crypto.randomBytes(24).toString('base64url');
   const sessionId = crypto.randomBytes(4).toString('hex');
   const address = `guest:${sessionId}`;
@@ -1415,6 +1461,7 @@ app.post('/api/webphone/session', (req, res) => {
 function guestFromReq(req) {
   const m = /^Bearer\s+(\S+)$/i.exec(String(req.headers.authorization || ''));
   if (!m) return null;
+  pruneExpiredGuestState();
   const sess = guestSessions.get(m[1]);
   if (!sess || sess.expiresAt < Date.now()) return null;
   return sess;
@@ -1489,8 +1536,12 @@ app.post('/api/linux/sip-probe', async (req, res) => {
   const body = req.body || {};
   const host = String(body.host || '127.0.0.1').trim();
   const port = Math.min(65535, Math.max(1, Number(body.port) || 5060));
-  const result = await probeSip(host, port, 1500);
-  res.json(result);
+  try {
+    const result = await probeSip(host, port, 1500);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
 });
 
 if (require.main === module) {
@@ -1544,4 +1595,7 @@ module.exports = {
   resetQuotaCounters,
   probeSmtpGreeting,
   relayHealth,
+  guestInvites,
+  guestSessions,
+  pruneExpiredGuestState,
 };
